@@ -28,30 +28,32 @@
 import asyncio
 from graphrag_agent.tools.crawler import AsyncWebCrawler
 from graphrag_agent.tools.content_parser import AsyncPageContentParser
+from graphrag_agent.tools.qa_generator import AsyncQuestionGenerator3
 
 
 async def main():
     base_url = "https://datastax.github.io/graph-rag/"
     crawler_queue = asyncio.Queue()
     parser_queue = asyncio.Queue()
-    results = {}
 
     crawler = AsyncWebCrawler(
         base_url=base_url, max_depth=2, include_external=False, delay=1.0
     )
     parser = AsyncPageContentParser(delay=1.0)
+    question_generator = AsyncQuestionGenerator3(model="llama3.3:latest")
 
     # Run crawler and parser concurrently
-    with open("results.jsonl", "w") as output_file:
+    with open("qanda.jsonl", "w") as output_file:
         crawler_task = asyncio.create_task(crawler.run(crawler_queue))
         parser_task = asyncio.create_task(
-            parser.parse(crawler_queue, parser_queue, output_file)
+            parser.parse(crawler_queue, output=parser_queue)
+        )
+        qa_task = asyncio.create_task(
+            question_generator.process_queue(parser_queue, output=output_file)
         )
 
         # Wait for both tasks to complete
-        await asyncio.gather(crawler_task, parser_task)
-
-    print("Results saved to results.jsonl")
+        await asyncio.gather(crawler_task, parser_task, qa_task)
 
 
 if __name__ == "__main__":

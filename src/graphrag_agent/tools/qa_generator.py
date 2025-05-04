@@ -3,36 +3,79 @@ import json
 import httpx
 from typing import List, Optional
 from utils.logging_config import get_logger  # Shared logger
-from ollama import Ollama  # Import the Ollama Python client
-
+from ollama import AsyncClient, chat
+from typing import Dict, Union
 
 logger = get_logger(__name__)  # Get a logger for this module
 
 
-class AsyncQuestionGeneratorv1:
+class BaseAsyncQuestionGenerator:
     """
-    Asynchronous tool to generate questions using a local LLM via Ollama.
-    This tool takes URLs, titles, and content from a queue and prompts the LLM
-    to generate all possible questions that can be answered by the content.
+    Base class for asynchronous question generation using an LLM.
+    Provides common functionality for querying an LLM and processing a queue.
+    """
+
+    def __init__(self, model: str):
+        self.model = model
+
+    async def query_llm(self, title: str, content: str) -> List[str]:
+        """
+        Abstract method to query the LLM. Must be implemented by subclasses.
+        """
+        raise NotImplementedError("Subclasses must implement the query_llm method.")
+
+    async def process_queue(
+        self,
+        queue: asyncio.Queue,
+        output: Union[asyncio.Queue, Dict[str, Dict[str, List[str]]]] = None,
+    ):
+        """
+        Continuously processes items from the queue, queries the LLM, and writes results to a file.
+        Accepts an already open file handle instead of a file name.
+        """
+        while True:
+            item = await queue.get()
+            if item is None:  # Signal that processing is complete
+                break
+
+            url = item.get("url")
+            title = item.get("title")
+            content = " ".join(
+                item.get("content", [])
+            )  # Combine content into a single string
+
+            logger.info(f"Generating questions for URL: {url}, Title: {title}")
+            questions = await self.query_llm(title, content)
+            logger.info(f"Q&A: {questions}")
+            if isinstance(output, asyncio.Queue):
+                await output.put({"url": questions})
+                queue.task_done()  # Mark the task as done
+            elif isinstance(output, dict):
+                output[url] = questions
+
+
+class AsyncQuestionGenerator1(BaseAsyncQuestionGenerator):
+    """
+    Asynchronous tool to generate questions using a local LLM via HTTP requests.
     """
 
     def __init__(
         self,
         ollama_url: str = "http://localhost:11434/api/completions",
-        model: str = "llama2",
+        model: str = "llama3.3:lattest",
     ):
+        super().__init__(model)
         self.ollama_url = ollama_url
-        self.model = model
 
     async def query_llm(self, title: str, content: str) -> List[str]:
         """
-        Sends a prompt to the local LLM via Ollama and retrieves the generated questions.
+        Sends a prompt to the local LLM via HTTP and retrieves the generated questions.
         """
         prompt = f"""
         Based on the following title and content, generate a list of questions that can be answered:
         Title: {title}
         Content: {content}
-        Format the output as a JSON list of strings, where each string is a question.
+        Format the output as an Alpaca-compatible list for future model tuning.
         """
         payload = {"model": self.model, "prompt": prompt}
 
@@ -46,49 +89,15 @@ class AsyncQuestionGeneratorv1:
                 logger.error(f"Error querying LLM: {e}")
                 return []
 
-    async def process_queue(
-        self, queue: asyncio.Queue, output_file: Optional[str] = None
-    ):
-        """
-        Continuously processes items from the queue, queries the LLM, and writes results to a file.
-        """
-        async with (
-            open(output_file, "a", encoding="utf-8")
-            if output_file
-            else None as file_handle
-        ):
-            while True:
-                item = await queue.get()
-                if item is None:  # Signal that processing is complete
-                    break
 
-                url = item.get("url")
-                title = item.get("title")
-                content = " ".join(
-                    item.get("content", [])
-                )  # Combine content into a single string
-
-                logger.info(f"Generating questions for URL: {url}, Title: {title}")
-                questions = await self.query_llm(title, content)
-
-                # Write results to the file if a file handle is provided
-                if file_handle:
-                    result = {"url": url, "title": title, "questions": questions}
-                    file_handle.write(json.dumps(result) + "\n")
-
-                queue.task_done()  # Mark the task as done
-
-
-class AsyncQuestionGeneratorv2:
+class AsyncQuestionGenerator2(BaseAsyncQuestionGenerator):
     """
     Asynchronous tool to generate questions using a local LLM via the Ollama Python client.
-    This tool takes URLs, titles, and content from a queue and prompts the LLM
-    to generate all possible questions that can be answered by the content.
     """
 
     def __init__(self, model: str = "llama2"):
-        self.model = model
-        self.client = Ollama()  # Initialize the Ollama client
+        super().__init__(model)
+        self.client = chat  # Initialize the Ollama client
 
     async def query_llm(self, title: str, content: str) -> List[str]:
         """
@@ -102,7 +111,7 @@ class AsyncQuestionGeneratorv2:
         """
         try:
             # Use the Ollama client to query the model
-            response = self.client.generate(model=self.model, prompt=prompt)
+            response = self.client(model=self.model, prompt=prompt)
             questions = json.loads(
                 response.get("response", "[]")
             )  # Parse the JSON list of questions
@@ -111,34 +120,35 @@ class AsyncQuestionGeneratorv2:
             logger.error(f"Error querying LLM: {e}")
             return []
 
-    async def process_queue(
-        self, queue: asyncio.Queue, output_file: Optional[str] = None
-    ):
+
+class AsyncQuestionGenerator3(BaseAsyncQuestionGenerator):
+    """
+    Asynchronous tool to generate questions using a local LLM via the Ollama Python client with async calls.
+    """
+
+    def __init__(self, model: str = "llama2"):
+        super().__init__(model)
+        self.client = AsyncClient()  # Async client for Ollama
+
+    async def query_llm(self, title: str, content: str) -> List[str]:
         """
-        Continuously processes items from the queue, queries the LLM, and writes results to a file.
+        Sends a prompt to the local LLM via the Ollama Python client and retrieves the generated questions asynchronously.
         """
-        async with (
-            open(output_file, "a", encoding="utf-8")
-            if output_file
-            else None as file_handle
-        ):
-            while True:
-                item = await queue.get()
-                if item is None:  # Signal that processing is complete
-                    break
+        prompt = f"""
+        Based on the following title and content, generate a question and answer list containing the question and and answer
+        Title: {title}
+        Content: {content}
+        Format the output as a JSON list of strings, where each string is a question.
+        """
 
-                url = item.get("url")
-                title = item.get("title")
-                content = " ".join(
-                    item.get("content", [])
-                )  # Combine content into a single string
+        try:
+            response = await AsyncClient().chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                stream=False,
+            )
+            return response
 
-                logger.info(f"Generating questions for URL: {url}, Title: {title}")
-                questions = await self.query_llm(title, content)
-
-                # Write results to the file if a file handle is provided
-                if file_handle:
-                    result = {"url": url, "title": title, "questions": questions}
-                    file_handle.write(json.dumps(result) + "\n")
-
-                queue.task_done()  # Mark the task as done
+        except Exception as e:
+            logger.error(f"Error querying LLM asynchronously: {e}")
+            return []

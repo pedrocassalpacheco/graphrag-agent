@@ -1,12 +1,14 @@
 import asyncio
 import json
 import httpx
-from typing import List, Optional
-from utils.logging_config import get_logger  # Shared logger
+from typing import List
+import io
+from graphrag_agent.utils.logging_config import get_logger  # Shared logger
 from ollama import AsyncClient, chat
 from typing import Dict, Union
 
 logger = get_logger(__name__)  # Get a logger for this module
+qa_count = 0
 
 
 class BaseAsyncQuestionGenerator:
@@ -17,6 +19,7 @@ class BaseAsyncQuestionGenerator:
 
     def __init__(self, model: str):
         self.model = model
+        self.qa_count: int = 0
 
     async def query_llm(self, title: str, content: str) -> List[str]:
         """
@@ -24,34 +27,68 @@ class BaseAsyncQuestionGenerator:
         """
         raise NotImplementedError("Subclasses must implement the query_llm method.")
 
-    async def process_queue(
+    async def generate_qa(
         self,
-        queue: asyncio.Queue,
-        output: Union[asyncio.Queue, Dict[str, Dict[str, List[str]]]] = None,
+        input: asyncio.Queue,
+        output: Union[
+            asyncio.Queue, Dict[str, Dict[str, List[str]]], io.TextIOWrapper
+        ] = None,
     ):
         """
         Continuously processes items from the queue, queries the LLM, and writes results to a file.
         Accepts an already open file handle instead of a file name.
         """
         while True:
-            item = await queue.get()
+            item = await input.get()
             if item is None:  # Signal that processing is complete
-                break
+                logger.info("QA generator received termination signal, finishing")
+                if isinstance(output, io.TextIOWrapper):
+                    output.close()
+                    break
 
             url = item.get("url")
             title = item.get("title")
-            content = " ".join(
-                item.get("content", [])
-            )  # Combine content into a single string
+            content = self.format_content_list(
+                item.get("content")
+            )  # Format content list
 
-            logger.info(f"Generating questions for URL: {url}, Title: {title}")
+            logger.info(f"Using {self.model} to create Q&A for {url} {title}")
+
             questions = await self.query_llm(title, content)
-            logger.info(f"Q&A: {questions}")
+            self.qa_count += 1
+
+            logger.info(f"Q&A {self.qa_count}: {questions}")
+
             if isinstance(output, asyncio.Queue):
                 await output.put({"url": questions})
-                queue.task_done()  # Mark the task as done
+
             elif isinstance(output, dict):
                 output[url] = questions
+            elif isinstance(output, io.TextIOWrapper):
+                # Write to the file handle
+                output.write(
+                    json.dumps({"url": url, "title": title, "questions": questions})
+                    + "\n"
+                )
+
+            input.task_done()  # Mark the item as processed
+
+    def format_content_list(self, content_list: List) -> str:
+        formatted_text = ""
+        for item in content_list:
+            # Skip empty strings
+            if item == "":
+                continue
+
+            # Handle image dictionaries
+            if isinstance(item, dict) and "image" in item:
+                continue
+            elif isinstance(item, dict) and "table" in item:
+                continue
+            elif isinstance(item, str):
+                formatted_text += item + "\n\n"
+
+        return formatted_text.strip()  # Remove trailing newline
 
 
 class AsyncQuestionGenerator1(BaseAsyncQuestionGenerator):
@@ -104,10 +141,10 @@ class AsyncQuestionGenerator2(BaseAsyncQuestionGenerator):
         Sends a prompt to the local LLM via the Ollama Python client and retrieves the generated questions.
         """
         prompt = f"""
-        Based on the following title and content, generate a list of questions that can be answered:
+        Based on the following title and content, generate a list of questions that can be answered and the respective answers using just the title and content
         Title: {title}
         Content: {content}
-        Format the output as a JSON list of strings, where each string is a question.
+        Structured the output according the Alpaca-compatible list for future model tuning.
         """
         try:
             # Use the Ollama client to query the model
@@ -147,7 +184,7 @@ class AsyncQuestionGenerator3(BaseAsyncQuestionGenerator):
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
             )
-            return response
+            return response.message.content
 
         except Exception as e:
             logger.error(f"Error querying LLM asynchronously: {e}")

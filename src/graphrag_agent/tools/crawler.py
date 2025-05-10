@@ -171,7 +171,7 @@ class AsyncFileSystemCrawler:
         
         # Mark this directory as visited
         self.visited.add(current_path)
-        logger.debug(f"Scanning directory: {current_path} (depth: {depth})")
+        logger.debug(f"Scanning directory: {current_path} (depth: {depth}/{self.max_depth}")
         
         try:
             # Get directory entries asynchronously

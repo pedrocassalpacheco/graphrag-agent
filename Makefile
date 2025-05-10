@@ -33,6 +33,14 @@ run:
 	$(UV) sync        
 	PYTHONPATH=$(SRC_DIR) $(PYTHON) src/graphrag_agent/main.py
 
+PROFILE_OUTPUT=profile_results.prof
+
+profile:
+	PYTHONPATH=$(SRC_DIR) python -m cProfile -o $(PROFILE_OUTPUT) src/graphrag_agent/main.py
+
+view-profile:
+	PYTHONPATH=$(SRC_DIR) python -m pstats $(PROFILE_OUTPUT)
+
 clean:
 	@echo "Cleaning up..."
 	rm -rf $(VENV_NAME) __pycache__ *.pyc

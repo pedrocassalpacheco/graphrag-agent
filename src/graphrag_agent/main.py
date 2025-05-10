@@ -31,6 +31,9 @@ from graphrag_agent.tools.content_parser import AsyncPageContentParser
 from graphrag_agent.tools.qa_generator import AsyncQuestionGenerator3
 from graphrag_agent.tools.content_parser import AsyncMarkdownParser
 from graphrag_agent.tools.document_embedding import OllamaEmbeddingGenerator
+from graphrag_agent.tools.vector_store import AsyncAstraDBWriter
+from graphrag_agent.tools.content_parser import AsyncPythonSourceParser
+
 import os
 from dotenv import load_dotenv
 
@@ -74,48 +77,60 @@ async def graph_rag():
 
 async def prompt_flow():
     
-    path = "/opt/langflow/docs/docs/components"
+    path = "/opt/langflow/docs/docs/Components"
     crawler_queue: asyncio.queues.Queue = asyncio.Queue()
     parser_queue: asyncio.queues.Queue = asyncio.Queue()
-
+    
     crawler = AsyncFileSystemCrawler(
         base_path=path, max_depth=3, extensions=["md"], delay=1.0
     )
     parser = AsyncMarkdownParser(delay=1.0)
-    embedding = OllamaEmbeddingGenerator(model_name="nomic-embed-text")
-
-    crawler_task = asyncio.create_task(crawler.run(crawler_queue))
-    parser_task = asyncio.create_task(
-         parser.parse(input=crawler_queue, output=parser_queue)
-    )
-    fp = open("embeddings.jsonl", "w")
-    embedding_task = asyncio.create_task(
-         embedding.generate_embeddings(input=parser_queue, output=fp)
-    )
-
-    # Wait for both tasks to complete
-    await asyncio.gather(crawler_task, parser_task, embedding_task)
-    
-    fp.close()
-        
-async def db():
-    # Initialize the database connection
-    from graphrag_agent.tools.vector_store import AsyncAstraDBWriter
-    vector_store = AsyncAstraDBWriter(
+    writer = AsyncAstraDBWriter(
         collection_name=ASTRA_DB_COLLECTION,
         token=ASTRA_DB_TOKEN,
         endpoint=ASTRA_DB_ENDPOINT, 
         keyspace=ASTRA_DB_KEYSPACE,
         vector_dimension=VECTOR_DIMENSION
     )
+
+    crawler_task = asyncio.create_task(crawler.run(crawler_queue))
+    parser_task = asyncio.create_task(
+         parser.parse(input=crawler_queue, output=parser_queue)
+    )
+    writer_task = asyncio.create_task(writer.write(input=parser_queue))
+
+    # Wait for both tasks to complete
+    await asyncio.gather(crawler_task, parser_task, writer_task)
+      
+async def python():
     
-    await vector_store.initialize_client()
-    # Perform operations with the vector store
-    # For example, inserting documents, querying, etc.
-    pass
-        
+    path = "/opt/langflow/src/backend/base/langflow/components"
+    crawler_queue: asyncio.queues.Queue = asyncio.Queue()
+    parser_queue: asyncio.queues.Queue = asyncio.Queue()
+    
+    crawler = AsyncFileSystemCrawler(
+        base_path=path, max_depth=4, extensions=["py"], delay=1.0
+    )
+    parser = AsyncPythonSourceParser(delay=1.0)
+    writer = AsyncAstraDBWriter(
+        collection_name=ASTRA_DB_COLLECTION,
+        token=ASTRA_DB_TOKEN,
+        endpoint=ASTRA_DB_ENDPOINT, 
+        keyspace=ASTRA_DB_KEYSPACE,
+        vector_dimension=VECTOR_DIMENSION
+    )
+
+    crawler_task = asyncio.create_task(crawler.run(crawler_queue))
+    parser_task = asyncio.create_task(
+         parser.parse(input=crawler_queue, output=parser_queue)
+    )
+    writer_task = asyncio.create_task(writer.write(input=parser_queue))
+
+    # Wait for both tasks to complete
+    await asyncio.gather(crawler_task, parser_task, writer_task)      
+  
 if __name__ == "__main__":
-    asyncio.run(db())
+    asyncio.run(python())
     #asyncio.run(file_crawler())
     # # Save results to a JSON Lines file
     # import json

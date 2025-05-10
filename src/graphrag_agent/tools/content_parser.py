@@ -1,14 +1,18 @@
+import ast
 import asyncio
 import httpx
-from bs4 import BeautifulSoup
-from typing import Dict, List, Union, Optional
-import re
 import io
 import json
+import os
+import re
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+from bs4 import BeautifulSoup
 from markdown_it import MarkdownIt
 
 from graphrag_agent.utils.logging_config import get_logger
+
 
 logger = get_logger(__name__)
 
@@ -269,4 +273,65 @@ class AsyncMarkdownParser(BaseAsyncParser):
         if current_title and current_content:
             structured_content[current_title] = '\n'.join(current_content).strip()
         
+        return structured_content
+    
+class AsyncPythonSourceParser(BaseAsyncParser):
+    """
+    Asynchronous tool to parse Python source code files into chunks of functions and classes.
+    """
+    
+    def __init__(self, delay: float = 0.0):
+        super().__init__(delay)
+        self.parsed_count = 0
+    
+    async def _get_content(self, path_str: str) -> Optional[str]:
+        """Validate and return the python file path object from string."""
+        path = Path(path_str)
+        if not path.exists() or not path.is_file() or path.suffix != ".py":
+            logger.error(f"Invalid Python file path: {path_str}")
+            return ""
+        else:
+            return path
+    
+    async def _parse_content(self, path: Path) -> Dict[str, List[str]]:
+        """Parse Python source code into a structured format using a file object."""
+        structured_content = {}
+        try:
+            # Open the file and pass the file object to ast.parse()
+            with path.open("r", encoding="utf-8") as file:
+                tree = ast.parse(file.read(), filename=str(path))
+
+            # Extract module docstring if available
+            module_docstring = ast.get_docstring(tree)
+            if module_docstring:
+                structured_content[f"{path.name}::module"] = [module_docstring]
+
+            # Parse functions and classes
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    start_line = node.lineno - 1
+                    end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
+                    with path.open("r", encoding="utf-8") as file:
+                        content = file.read()
+                    chunk = "\n".join(content.splitlines()[start_line:end_line])
+
+                    section_title = f"{path.name}::{node.name}"
+                    structured_content[section_title] = [chunk]
+
+                elif isinstance(node, ast.ClassDef):
+                    start_line = node.lineno - 1
+                    end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
+                    with path.open("r", encoding="utf-8") as file:
+                        content = file.read()
+                    chunk = "\n".join(content.splitlines()[start_line:end_line])
+
+                    section_title = f"{path.name}::{node.name}"
+                    structured_content[section_title] = [chunk]
+
+            self.parsed_count += len(structured_content)
+            logger.info(f"Parsed {len(structured_content)} Python code sections from {path.name}")
+
+        except Exception as e:
+            logger.error(f"Error parsing Python code from {path}: {e}")
+
         return structured_content

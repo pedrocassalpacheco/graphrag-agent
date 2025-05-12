@@ -2,6 +2,7 @@ import asyncio
 import json
 import io
 from typing import Dict, List, Union, Any, Optional
+import traceback
 import numpy as np
 
 from graphrag_agent.utils.logging_config import get_logger
@@ -16,7 +17,7 @@ class BaseAsyncEmbeddingGenerator:
     process documents from a queue and add embeddings to them.
     """
     
-    def __init__(self, embedding_key: str = "embedding"):
+    def __init__(self, embedding_key: str = "$vector"):
         self.embedding_key = embedding_key
         self.processed_count = 0
     
@@ -27,34 +28,50 @@ class BaseAsyncEmbeddingGenerator:
     def _prepare_text(self, document: Dict[str, Any]) -> str:
         """Extract and prepare text from a document for embedding."""
         title = document.get("title", "")
-        content = document.get("content", [])
+        content = document.get("content", "")
         
-        # Create a single string from title and content
-        text_parts = [title]
-        
-        for item in content:
-            if isinstance(item, str):
-                text_parts.append(item)
-            elif isinstance(item, dict) and "image" in item:
-                # Skip images or include alt text if needed
-                alt = item["image"].get("alt", "")
-                if alt:
-                    text_parts.append(alt)
-        
-        return " ".join(text_parts)
+        # Handle different content types
+        if isinstance(content, list):
+            text_parts = [title]
+            
+            for item in content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, list):
+                    # Flatten nested lists
+                    text_parts.append(" ".join(str(subitem) for subitem in item))
+                elif isinstance(item, dict) and "image" in item:
+                    # Skip images or include alt text if needed
+                    alt = item["image"].get("alt", "")
+                    if alt:
+                        text_parts.append(alt)
+                else:
+                    # Convert any other type to string
+                    text_parts.append(str(item))
+            
+            return " ".join(text_parts)
+        elif isinstance(content, str):
+            return f"{title} {content}"
+        else:
+            # Convert any non-string content to string
+            return f"{title} {str(content)}"
     
     async def _generate_embedding(self, text: str) -> List[float]:
         """Generate an embedding for the given text (to be implemented by subclasses)."""
         raise NotImplementedError("Subclasses must implement this method")
     
-    async def generate_embeddings(
+    async def embed(
         self,
         input: asyncio.Queue,
-        output: Union[
-            asyncio.Queue, Dict[str, Dict[str, Any]], io.TextIOWrapper
-        ] = None,
+        output: Union[asyncio.Queue, Dict[str, Dict[str, Any]], io.TextIOWrapper] = None,
     ) -> None:
-        """Process documents from input queue, generate embeddings, and output results."""
+        """
+        Process documents from input queue, generate embeddings, and output results.
+        
+        Args:
+            input: Queue containing documents to process
+            output: Destination for processed documents (queue, dict, or file)
+        """
         # Initialize the model if not already done
         await self.initialize_model()
         
@@ -91,9 +108,16 @@ class BaseAsyncEmbeddingGenerator:
                 
             except Exception as e:
                 logger.error(f"Error generating embedding: {str(e)}")
+                logger.error(f"Call stack:\n{traceback.format_exc()}")
             
             # Mark the item as processed
             input.task_done()
+    
+    # Keep the old method name for backward compatibility
+    async def generate_embeddings(self, input, output=None):
+        """Legacy method, use embed() instead."""
+        logger.warning("generate_embeddings() is deprecated, use embed() instead")
+        return await self.embed(input, output)
 
 
 class SentenceTransformerEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
@@ -115,12 +139,17 @@ class SentenceTransformerEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
     async def initialize_model(self):
         """Initialize the SentenceTransformer model asynchronously."""
         if self.model is None:
-            logger.info(f"Initializing SentenceTransformer model: {self.model_name}")
-            # Import here to allow for installation of the package if needed
-            from sentence_transformers import SentenceTransformer
-            # Run model initialization in a thread to not block the event loop
-            self.model = await asyncio.to_thread(SentenceTransformer, self.model_name)
-            logger.info("Model initialization complete")
+            try:
+                logger.info(f"Initializing SentenceTransformer model: {self.model_name}")
+                # Import here to allow for installation of the package if needed
+                from sentence_transformers import SentenceTransformer
+                # Run model initialization in a thread to not block the event loop
+                self.model = await asyncio.to_thread(SentenceTransformer, self.model_name)
+                logger.info("Model initialization complete")
+            except Exception as e:
+                logger.error(f"Error initializing SentenceTransformer model: {str(e)}")
+                logger.error(f"Call stack:\n{traceback.format_exc()}")
+                raise
     
     async def _generate_embedding(self, text: str) -> List[float]:
         """Generate an embedding using SentenceTransformer."""
@@ -128,11 +157,17 @@ class SentenceTransformerEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
             # Return a zero vector of appropriate size if text is empty
             return [0.0] * self.model.get_sentence_embedding_dimension()
         
-        # Use the model to generate embeddings asynchronously
-        embedding = await asyncio.to_thread(self.model.encode, text)
-        
-        # Convert numpy array to list for JSON serialization
-        return embedding.tolist()
+        try:
+            # Use the model to generate embeddings asynchronously
+            embedding = await asyncio.to_thread(self.model.encode, text)
+            
+            # Convert numpy array to list for JSON serialization
+            return embedding.tolist()
+        except Exception as e:
+            logger.error(f"Error generating embedding with SentenceTransformer: {str(e)}")
+            logger.error(f"Call stack:\n{traceback.format_exc()}")
+            # Return zero vector for failed embeddings
+            return [0.0] * self.model.get_sentence_embedding_dimension()
 
 
 class OllamaEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
@@ -154,10 +189,15 @@ class OllamaEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
     async def initialize_model(self):
         """Initialize the Ollama client."""
         if self.client is None:
-            logger.info(f"Initializing Ollama client for model: {self.model_name}")
-            from ollama import AsyncClient
-            self.client = AsyncClient(host=self.api_host)
-            logger.info("Ollama client initialization complete")
+            try:
+                logger.info(f"Initializing Ollama client for model: {self.model_name}")
+                from ollama import AsyncClient
+                self.client = AsyncClient(host=self.api_host)
+                logger.info("Ollama client initialization complete")
+            except Exception as e:
+                logger.error(f"Error initializing Ollama client: {str(e)}")
+                logger.error(f"Call stack:\n{traceback.format_exc()}")
+                raise
     
     async def _generate_embedding(self, text: str) -> List[float]:
         """Generate an embedding using Ollama API."""
@@ -182,4 +222,77 @@ class OllamaEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
             
         except Exception as e:
             logger.error(f"Error getting embedding from Ollama: {str(e)}")
+            logger.error(f"Call stack:\n{traceback.format_exc()}")
             return []
+        
+class OpenAIEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
+    """
+    Embedding generator using OpenAI's API for embeddings.
+    
+    Processes documents asynchronously and generates embeddings using
+    OpenAI's text-embedding models.
+    """
+    
+    def __init__(
+        self, 
+        model_name: str = "text-embedding-3-large",
+        api_key: str = None,
+        dimensions: int = 3072,  # Update this to 3072 for full model capacity
+        embedding_key: str = "$vector",
+        max_text_length: int = 8191,  # OpenAI limit is 8191 tokens
+    ):
+        super().__init__(embedding_key)
+        self.model_name = model_name
+        self.dimensions = dimensions
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.client = None
+        self.max_text_length = max_text_length
+    
+    async def initialize_model(self):
+        """Initialize the OpenAI client."""
+        if self.client is None:
+            try:
+                logger.info(f"Initializing OpenAI client for model: {self.model_name}")
+                from openai import AsyncOpenAI
+                
+                if not self.api_key:
+                    raise ValueError("OpenAI API key not found. Set it in .env or pass it to the constructor.")
+                
+                self.client = AsyncOpenAI(api_key=self.api_key)
+                logger.info("OpenAI client initialization complete")
+            except Exception as e:
+                logger.error(f"Error initializing OpenAI client: {str(e)}")
+                logger.error(f"Call stack:\n{traceback.format_exc()}")
+                raise
+    
+    async def _generate_embedding(self, text: str) -> List[float]:
+        """Generate an embedding using OpenAI API."""
+        if not text.strip():
+            # Return a zero vector of appropriate size for empty text
+            return [0.0] * self.dimensions
+        
+        try:
+            # Optionally truncate if text is very long
+            if len(text) > self.max_text_length * 4:  # Rough character estimate
+                logger.warning(f"Text exceeds recommended length. Truncating from {len(text)} chars.")
+                text = text[:self.max_text_length * 4]  # Rough truncation
+            
+            # Call OpenAI embeddings API
+            response = await self.client.embeddings.create(
+                model=self.model_name,
+                input=text,
+                dimensions=self.dimensions,
+            )
+            
+            # Extract the embedding from the response
+            if response and response.data and len(response.data) > 0:
+                return response.data[0].embedding
+            else:
+                logger.error(f"Empty or unexpected response from OpenAI: {response}")
+                return [0.0] * self.dimensions
+            
+        except Exception as e:
+            logger.error(f"Error getting embedding from OpenAI: {str(e)}")
+            logger.error(f"Call stack:\n{traceback.format_exc()}")
+            # Return zero vector for failed embeddings
+            return [0.0] * self.dimensions

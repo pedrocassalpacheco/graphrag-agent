@@ -126,33 +126,23 @@ class AsyncWebCrawler:
 
 
 class AsyncFileSystemCrawler:
-    """Asynchronous file system crawler for finding files with specific extensions.
+    """Asynchronous file system crawler for finding files with specific extensions."""
     
-    This class scans a directory and its subdirectories to find files matching 
-    specified extensions. It can be configured to limit the depth of recursion
-    and to include or exclude specific patterns.
-    
-    Attributes:
-        base_path (str): The base directory path to start crawling from.
-        max_depth (int): The maximum depth to crawl. Default is 2.
-        extensions (List[str]): List of file extensions to include (e.g., ['.py', '.md'])
-        delay (float): Small delay between operations to prevent resource exhaustion.
-        visited (Set[str]): A set of paths that have already been visited.
-    """
-
     def __init__(
         self,
         base_path: str,
         max_depth: int = 2,
         extensions: List[str] = None,
         delay: float = 0.001,
+        discard: Optional[List[str]] = None,
     ):
-        self.base_path = os.path.abspath(base_path)
+        self.base_path = base_path
         self.max_depth = max_depth
-        self.extensions = extensions or []  # Default extensions
+        self.extensions = extensions or []
         self.delay = delay
-        self.visited: Set[str] = set()
-        self.found_files: Set[str] = set()
+        self.visited = set()
+        self.found_files = set()
+        self.discard = discard or []  # Default to an empty list if no discard patterns are provided
     
     def _should_include_file(self, filename: str) -> bool:
         """Check if a file should be included based on its extension."""
@@ -171,7 +161,7 @@ class AsyncFileSystemCrawler:
         
         # Mark this directory as visited
         self.visited.add(current_path)
-        logger.debug(f"Scanning directory: {current_path} (depth: {depth}/{self.max_depth}")
+        logger.debug(f"Scanning directory: {current_path} (depth: {depth}/{self.max_depth})")
         
         try:
             # Get directory entries asynchronously
@@ -181,6 +171,11 @@ class AsyncFileSystemCrawler:
             for entry in entries:
                 # Small delay to prevent resource exhaustion
                 await asyncio.sleep(self.delay)
+                
+                # Skip discarded files
+                if entry.is_file() and entry.name in self.discard:
+                    logger.info(f"Discarding file: {entry.name}")
+                    continue
                 
                 if entry.is_file() and self._should_include_file(entry.name):
                     file_path = os.path.abspath(entry.path)

@@ -33,6 +33,10 @@ run:
 	$(UV) sync        
 	PYTHONPATH=$(SRC_DIR) $(PYTHON) src/graphrag_agent/main.py
 
+debug:
+	@echo "Starting the debugger..."
+	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pdb src/graphrag_agent/main.py
+
 PROFILE_OUTPUT=profile_results.prof
 
 profile:

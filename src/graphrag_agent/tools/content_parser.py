@@ -180,12 +180,27 @@ class AsyncPageContentParser(BaseAsyncParser):
 
 
 class AsyncMarkdownParser(BaseAsyncParser):
-    """Asynchronous parser for local markdown files."""
+    """
+    Asynchronous parser for local markdown files.
+    This class provides functionality to read and parse markdown files asynchronously.
+    It extracts structured content such as headings, paragraphs, images, and tables
+    directly from markdown content without converting it to HTML.
+    Attributes:
+        delay (float): The delay time (in seconds) for asynchronous operations.
+    Methods:
+        read_file(file_path: str) -> Optional[str]:
+            Reads the content of a markdown file asynchronously.
+        _get_content(file_path: str) -> Optional[str]:
+            Reads content from a local file.
+        _parse_content(content: str) -> Dict[str, List[str]]:
+            Parses markdown content and extracts structured data such as headings,
+            paragraphs, images, and tables.
+    """
 
     def __init__(self, delay: float = 0.01):
         super().__init__(delay)
 
-    async def read_file(self, file_path: str) -> Optional[str]:
+    async def _read_file(self, file_path: str) -> Optional[str]:
         """Read the content of a markdown file asynchronously."""
         try:
             content = await asyncio.to_thread(Path(file_path).read_text, encoding='utf-8')
@@ -196,7 +211,7 @@ class AsyncMarkdownParser(BaseAsyncParser):
 
     async def _get_content(self, file_path: str) -> Optional[str]:
         """Read content from a local file."""
-        return await self.read_file(file_path)
+        return await self._read_file(file_path)
 
     async def _parse_content(self, content: str) -> Dict[str, List[str]]:
         """Parse markdown content directly without converting to HTML."""
@@ -274,10 +289,198 @@ class AsyncMarkdownParser(BaseAsyncParser):
             structured_content[current_title] = '\n'.join(current_content).strip()
         
         return structured_content
-    
-class AsyncPythonSourceParser(BaseAsyncParser):
+
+class AsyncLangflowDocsMarkdownParser(AsyncMarkdownParser):
+    """A parser for processing Markdown content specific for langflow 
+    asynchronously, specifically designed to handle Langflow documentation. This parser preserves tables and header
+    hierarchy while extracting content into structured sections.
+    Methods:
+        async _parse_content(content: str) -> Dict[str, str]:
+            Parses the provided Markdown content, organizing it into sections
+            based on H2 headers. Each section includes its content, preserving
+            tables and subheaders (H3).
+        _process_table(tokens, i) -> Tuple[List[str], int]:
+            Processes a Markdown table, converting it into a list of formatted
+            Markdown rows. Handles table headers, alignment, and data rows.
     """
-    Asynchronous tool to parse Python source code files into chunks of functions and classes.
+    
+    async def _parse_content(self, content: str) -> Dict[str, str]:
+        """Parse Markdown content, preserving tables and header hierarchy."""
+        if not content:
+            return {}
+        
+        md = MarkdownIt('gfm-like')
+        tokens = md.parse(content)
+        
+        sections = {}
+        current_h2 = None
+        current_section = []
+        
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            
+            # Check for H2 headers
+            if token.type == 'heading_open' and token.tag == 'h2':
+                # Save previous section if it exists
+                if current_h2 and current_section:
+                    sections[current_h2] = current_section
+                    current_section = []
+                
+                # Get the H2 heading content
+                i += 1
+                if i < len(tokens) and tokens[i].type == 'inline':
+                    current_h2 = tokens[i].content.strip()
+                i += 1  # Skip heading_close
+                continue
+            
+            # Handle tables specially to preserve structure
+            elif current_h2 and token.type == 'table_open':
+                table_md, new_i = self._process_table(tokens, i)
+                current_section.append(table_md)
+                i = new_i
+            
+            # For all other content in an H2 section
+            elif current_h2:
+                if token.type == 'paragraph_open':
+                    i += 1
+                    if i < len(tokens) and tokens[i].type == 'inline':
+                        current_section.append(tokens[i].content)
+                    i += 1  # Skip paragraph_close
+                
+                elif token.type == 'heading_open' and token.tag == 'h3':
+                    # Include H3 headers as part of the content
+                    i += 1
+                    if i < len(tokens) and tokens[i].type == 'inline':
+                        current_section.append(f"### {tokens[i].content}")
+                    i += 1  # Skip heading_close
+                
+                elif token.type == 'inline' and token.content:
+                    current_section.append(token.content)
+                    i += 1
+                
+                else:
+                    i += 1
+            else:
+                i += 1
+        
+        # Save the last section
+        if current_h2 and current_section:
+            sections[current_h2] = current_section
+        
+        self.parsed_count = len(sections)
+        logger.info(f"Parsed {len(sections)} Markdown sections")
+        
+        return sections
+        
+    def _process_table(self, tokens, i):
+        """
+        Process a Markdown table and format it as a list of table rows.
+        
+        Args:
+            tokens: List of markdown tokens
+            i: Current token index
+            
+        Returns:
+            tuple: (list of table row strings, new token index)
+        """
+        table_rows = []
+        header_row = []
+        alignment = []
+        is_header = True
+        
+        i += 1  # Move to next token after table_open
+        
+        # Process table content
+        while i < len(tokens) and tokens[i].type != 'table_close':
+            if tokens[i].type == 'thead_open':
+                i += 1  # Skip thead_open
+            elif tokens[i].type == 'thead_close':
+                is_header = False
+                i += 1  # Skip thead_close
+            elif tokens[i].type == 'tbody_open':
+                i += 1  # Skip tbody_open
+            elif tokens[i].type == 'tbody_close':
+                i += 1  # Skip tbody_close
+            elif tokens[i].type == 'tr_open':
+                row = []
+                i += 1  # Skip tr_open
+                
+                # Process row content
+                while i < len(tokens) and tokens[i].type != 'tr_close':
+                    if tokens[i].type in ['th_open', 'td_open']:
+                        if tokens[i].type == 'th_open' and is_header:
+                            # Extract alignment if this is a header cell
+                            align = tokens[i].attrs.get('style', '').replace('text-align:', '').strip() if tokens[i].attrs else ''
+                            alignment.append(align)
+                        
+                        i += 1  # Skip th_open or td_open
+                        
+                        # Get cell content
+                        if i < len(tokens) and tokens[i].type == 'inline':
+                            cell_content = tokens[i].content.strip()
+                            row.append(cell_content)
+                        
+                        i += 1  # Skip cell content
+                        i += 1  # Skip th_close or td_close
+                    else:
+                        i += 1  # Skip other tokens
+                
+                if is_header:
+                    header_row = row
+                else:
+                    table_rows.append(row)
+                
+                i += 1  # Skip tr_close
+            else:
+                i += 1  # Skip other tokens
+        
+        # Format the table in Markdown as a list of rows
+        table_md_rows = []
+        if header_row:
+            # Create the header row
+            table_md_rows.append("| " + " | ".join(header_row) + " |")
+            
+            # Create the separator row with alignment
+            sep_row = []
+            for idx, col in enumerate(header_row):
+                align = alignment[idx] if idx < len(alignment) else ''
+                if align == 'center':
+                    sep_row.append(':' + '-' * (len(col) + 1) + ':')
+                elif align == 'right':
+                    sep_row.append('-' * (len(col) + 1) + ':')
+                else:  # left or default
+                    sep_row.append('-' * (len(col) + 2))
+            
+            table_md_rows.append("| " + " | ".join(sep_row) + " |")
+            
+            # Add data rows
+            for row in table_rows:
+                # Make sure each row has the same number of columns as the header
+                while len(row) < len(header_row):
+                    row.append("")
+                table_md_rows.append("| " + " | ".join(row) + " |")
+        
+        return table_md_rows, i + 1  # Return the list of formatted table rows and the new index
+
+class AsyncPythonSourceParser(BaseAsyncParser):
+    """Asynchronous tool to parse Python source code files into structured chunks of functions and classes.
+    This parser reads Python source files, analyzes their Abstract Syntax Tree (AST), and extracts
+    structured information such as module-level docstrings, class definitions (including specific
+    attributes like `inputs`, `outputs`, `display_name`, and `name`), and function definitions.
+    It supports filtering nodes based on naming conventions and provides the ability to process
+    files asynchronously.
+    Attributes:
+        delay (float): Optional delay for asynchronous operations. Defaults to 0.0.
+        parsed_count (int): Counter for the number of parsed sections.
+    Methods:
+        _get_content(path_str: str) -> Optional[str]:
+            Validate and return the Python file path object from a string.
+        _parse_content_old(path: Path) -> Dict[str, List[str]]:
+            Parse Python source code into a structured format using a file object (legacy method).
+        _parse_content(path: Path) -> Dict[str, List[str]]:
+            Parse Python source code into a structured format using a file object.
+        should_include_node(node: ast.AST) -> bool:
     """
     
     def __init__(self, delay: float = 0.0):
@@ -293,40 +496,44 @@ class AsyncPythonSourceParser(BaseAsyncParser):
         else:
             return path
     
-    async def _parse_content(self, path: Path) -> Dict[str, List[str]]:
+    async def _parse_content_old(self, path: Path) -> Dict[str, List[str]]:
         """Parse Python source code into a structured format using a file object."""
         structured_content = {}
         try:
-            # Open the file and pass the file object to ast.parse()
+            # Read the file content once
             with path.open("r", encoding="utf-8") as file:
-                tree = ast.parse(file.read(), filename=str(path))
+                content = file.read()
+            
+            # Parse the file content into an AST
+            tree = ast.parse(content, filename=str(path))
 
             # Extract module docstring if available
             module_docstring = ast.get_docstring(tree)
             if module_docstring:
                 structured_content[f"{path.name}::module"] = [module_docstring]
 
+            # Split the file content into lines for easier slicing
+            lines = content.splitlines()
+
             # Parse functions and classes
             for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                
+  
+                if isinstance(node, ast.ClassDef):
+                    class_vars = {}
+                    for stmt in node.body:
+                        if isinstance(stmt, ast.Assign):
+                            for target in stmt.targets:
+                                if isinstance(target, ast.Name) and target.id in {"input", "output"}:
+                                    class_vars[target.id] = ast.unparse(stmt.value) 
+  
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    # Use the should_include_node method to filter nodes
                     start_line = node.lineno - 1
                     end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
-                    with path.open("r", encoding="utf-8") as file:
-                        content = file.read()
-                    chunk = "\n".join(content.splitlines()[start_line:end_line])
-
+                    chunk = lines[start_line:end_line]  # Keep each line as a separate list item
                     section_title = f"{path.name}::{node.name}"
-                    structured_content[section_title] = [chunk]
-
-                elif isinstance(node, ast.ClassDef):
-                    start_line = node.lineno - 1
-                    end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
-                    with path.open("r", encoding="utf-8") as file:
-                        content = file.read()
-                    chunk = "\n".join(content.splitlines()[start_line:end_line])
-
-                    section_title = f"{path.name}::{node.name}"
-                    structured_content[section_title] = [chunk]
+                    structured_content[section_title] = chunk
 
             self.parsed_count += len(structured_content)
             logger.info(f"Parsed {len(structured_content)} Python code sections from {path.name}")
@@ -335,3 +542,89 @@ class AsyncPythonSourceParser(BaseAsyncParser):
             logger.error(f"Error parsing Python code from {path}: {e}")
 
         return structured_content
+
+    async def _parse_content(self, path: Path) -> Dict[str, List[str]]:
+        """Parse Python source code into a structured format using a file object."""
+        structured_content = {}
+        try:
+            # Read the file content once
+            with path.open("r", encoding="utf-8") as file:
+                content = file.read()
+            
+            # Parse the file content into an AST
+            tree = ast.parse(content, filename=str(path))
+
+            # Extract module docstring if available
+            module_docstring = ast.get_docstring(tree)
+            if module_docstring:
+                structured_content[f"{path.name}::module"] = [module_docstring]
+
+            # Split the file content into lines for easier slicing
+            lines = content.splitlines()
+
+            # Parse functions and classes
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    class_name = node.name
+                    class_vars = {"inputs": {}, "outputs": {}, "display_name": None, "name": None}
+
+                    # Extract class-level variables
+                    for stmt in node.body:
+                        if isinstance(stmt, ast.Assign):
+                            for target in stmt.targets:
+                                if isinstance(target, ast.Name):
+                                    if target.id in {"inputs", "outputs"}:
+                                        class_vars[target.id] = ast.unparse(stmt.value)
+                                    elif target.id == "display_name":
+                                        class_vars["display_name"] = ast.literal_eval(stmt.value)
+                                    elif target.id == "name":
+                                        class_vars["name"] = ast.literal_eval(stmt.value)
+
+                    # Extract the class content
+                    #start_line = node.lineno - 1
+                    #end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
+                    #chunk = lines[start_line:end_line]  # Keep each line as a separate list item
+
+                    # Add to structured content
+                    structured_content[f"{path.name}::{class_name}"] = {
+                        #"content": chunk,
+                        "inputs": class_vars["inputs"],
+                        "outputs": class_vars["outputs"],
+                        "display_name": class_vars["display_name"],
+                        "name": class_vars["name"],
+                    }
+
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Use the should_include_node method to filter nodes
+                    if not self.should_include_node(node):
+                        continue
+
+                    start_line = node.lineno - 1
+                    end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
+                    chunk = lines[start_line:end_line]  # Keep each line as a separate list item
+                    section_title = f"{path.name}::{node.name}"
+                    structured_content[section_title] = chunk
+
+            self.parsed_count += len(structured_content)
+            logger.info(f"Parsed {len(structured_content)} Python code sections from {path.name}")
+
+        except Exception as e:
+            logger.error(f"Error parsing Python code from {path}: {e}")
+
+        return structured_content
+
+    def should_include_node(self, node: ast.AST) -> bool:
+        """
+        Determine if an AST node should be included based on its name.
+
+        Args:
+            node (ast.AST): The AST node to check.
+
+        Returns:
+            bool: True if the node should be included, False otherwise.
+        """
+        # Check if the node has a name attribute and if it starts with an underscore
+        return hasattr(node, "name") and not node.name.startswith("_")
+    
+    
+    

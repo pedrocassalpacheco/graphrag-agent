@@ -132,6 +132,18 @@ class AsyncAstraDBRepository:
                 logger.error(f"Error initializing AstraDB client: {str(e)}")
                 raise
             
+    async def sample(self) -> Dict[str, Any]:
+        """Sample the collection to check if it is empty."""
+        await self.initialize_client()
+        
+        try:
+            # Check if the collection is empty
+            doc = self.collection.find_one({})
+            return doc
+        except Exception as e:
+            logger.error(f"Error sampling collection: {str(e)}")
+            raise
+        
     def _prepare_document(self, document: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare document for insertion into AstraDB.

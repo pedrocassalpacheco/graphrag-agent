@@ -26,8 +26,9 @@ class BaseAsyncParser:
         delay (float): Delay between operations to prevent resource exhaustion.
     """
     
-    def __init__(self, delay: float):
+    def __init__(self, delay: float = 0.001):
         self.delay = delay
+        self.parsed_count = 0
     
     def clean_text(self, text: str) -> str:
         """
@@ -104,9 +105,6 @@ class BaseAsyncParser:
 
 class AsyncPageContentParser(BaseAsyncParser):
     """Asynchronous parser for web page content."""
-
-    def __init__(self, delay: float = 1.0):
-        super().__init__(delay)
 
     async def fetch_page(self, url: str, client: httpx.AsyncClient) -> str:
         try:
@@ -196,9 +194,6 @@ class AsyncMarkdownParser(BaseAsyncParser):
             Parses markdown content and extracts structured data such as headings,
             paragraphs, images, and tables.
     """
-
-    def __init__(self, delay: float = 0.01):
-        super().__init__(delay)
 
     async def _read_file(self, file_path: str) -> Optional[str]:
         """Read the content of a markdown file asynchronously."""
@@ -463,7 +458,7 @@ class AsyncLangflowDocsMarkdownParser(AsyncMarkdownParser):
         
         return table_md_rows, i + 1  # Return the list of formatted table rows and the new index
 
-class AsyncPythonSourceParser(BaseAsyncParser):
+class AsyncPythonComponentParser(BaseAsyncParser):
     """Asynchronous tool to parse Python source code files into structured chunks of functions and classes.
     This parser reads Python source files, analyzes their Abstract Syntax Tree (AST), and extracts
     structured information such as module-level docstrings, class definitions (including specific
@@ -483,10 +478,6 @@ class AsyncPythonSourceParser(BaseAsyncParser):
         should_include_node(node: ast.AST) -> bool:
     """
     
-    def __init__(self, delay: float = 0.0):
-        super().__init__(delay)
-        self.parsed_count = 0
-    
     async def _get_content(self, path_str: str) -> Optional[str]:
         """Validate and return the python file path object from string."""
         path = Path(path_str)
@@ -496,53 +487,6 @@ class AsyncPythonSourceParser(BaseAsyncParser):
         else:
             return path
     
-    async def _parse_content_old(self, path: Path) -> Dict[str, List[str]]:
-        """Parse Python source code into a structured format using a file object."""
-        structured_content = {}
-        try:
-            # Read the file content once
-            with path.open("r", encoding="utf-8") as file:
-                content = file.read()
-            
-            # Parse the file content into an AST
-            tree = ast.parse(content, filename=str(path))
-
-            # Extract module docstring if available
-            module_docstring = ast.get_docstring(tree)
-            if module_docstring:
-                structured_content[f"{path.name}::module"] = [module_docstring]
-
-            # Split the file content into lines for easier slicing
-            lines = content.splitlines()
-
-            # Parse functions and classes
-            for node in ast.walk(tree):
-                
-  
-                if isinstance(node, ast.ClassDef):
-                    class_vars = {}
-                    for stmt in node.body:
-                        if isinstance(stmt, ast.Assign):
-                            for target in stmt.targets:
-                                if isinstance(target, ast.Name) and target.id in {"input", "output"}:
-                                    class_vars[target.id] = ast.unparse(stmt.value) 
-  
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    # Use the should_include_node method to filter nodes
-                    start_line = node.lineno - 1
-                    end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
-                    chunk = lines[start_line:end_line]  # Keep each line as a separate list item
-                    section_title = f"{path.name}::{node.name}"
-                    structured_content[section_title] = chunk
-
-            self.parsed_count += len(structured_content)
-            logger.info(f"Parsed {len(structured_content)} Python code sections from {path.name}")
-
-        except Exception as e:
-            logger.error(f"Error parsing Python code from {path}: {e}")
-
-        return structured_content
-
     async def _parse_content(self, path: Path) -> Dict[str, List[str]]:
         """Parse Python source code into a structured format using a file object."""
         structured_content = {}
@@ -559,59 +503,103 @@ class AsyncPythonSourceParser(BaseAsyncParser):
             if module_docstring:
                 structured_content[f"{path.name}::module"] = [module_docstring]
 
-            # Split the file content into lines for easier slicing
-            lines = content.splitlines()
-
-            # Parse functions and classes
+            # First pass: process class definitions
+            class_data = {}
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
-                    class_name = node.name
-                    class_vars = {"inputs": {}, "outputs": {}, "display_name": None, "name": None}
-
-                    # Extract class-level variables
-                    for stmt in node.body:
-                        if isinstance(stmt, ast.Assign):
-                            for target in stmt.targets:
-                                if isinstance(target, ast.Name):
-                                    if target.id in {"inputs", "outputs"}:
-                                        class_vars[target.id] = ast.unparse(stmt.value)
-                                    elif target.id == "display_name":
-                                        class_vars["display_name"] = ast.literal_eval(stmt.value)
-                                    elif target.id == "name":
-                                        class_vars["name"] = ast.literal_eval(stmt.value)
-
-                    # Extract the class content
-                    #start_line = node.lineno - 1
-                    #end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
-                    #chunk = lines[start_line:end_line]  # Keep each line as a separate list item
-
-                    # Add to structured content
-                    structured_content[f"{path.name}::{class_name}"] = {
-                        #"content": chunk,
-                        "inputs": class_vars["inputs"],
-                        "outputs": class_vars["outputs"],
-                        "display_name": class_vars["display_name"],
-                        "name": class_vars["name"],
-                    }
-
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    # Use the should_include_node method to filter nodes
-                    if not self.should_include_node(node):
-                        continue
-
-                    start_line = node.lineno - 1
-                    end_line = node.end_lineno if hasattr(node, "end_lineno") else node.body[-1].lineno
-                    chunk = lines[start_line:end_line]  # Keep each line as a separate list item
-                    section_title = f"{path.name}::{node.name}"
-                    structured_content[section_title] = chunk
+                    class_info = self._extract_class_definition(node)
+                    class_key = f"{path.name}::{class_info['class_name']}"
+                    
+                    # Initialize with class data and empty public_methods list
+                    class_data[class_key] = class_info
+                    
+                    # Store in structured content
+                    structured_content[class_key] = class_data[class_key]
+        
 
             self.parsed_count += len(structured_content)
             logger.info(f"Parsed {len(structured_content)} Python code sections from {path.name}")
+            logger.debug(f"Content \n{structured_content} ")
 
         except Exception as e:
             logger.error(f"Error parsing Python code from {path}: {e}")
+            import traceback
+            logger.debug(f"Call stack:\n{traceback.format_exc()}")
 
         return structured_content
+
+    def _extract_function_signature(self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> Dict[str, Any]:
+        """
+        Extract the function signature and related information from a function node.
+        
+        Args:
+            node (Union[ast.FunctionDef, ast.AsyncFunctionDef]): The AST node representing a function.
+        
+        Returns:
+            Dict[str, Any]: Dictionary containing function signature and metadata.
+        """
+        # Get the function name and arguments
+        func_name = node.name
+        args = ast.unparse(node.args)
+        
+        # Get the return type if available
+        return_type = ""
+        if node.returns:
+            return_type = f" -> {ast.unparse(node.returns)}"
+        
+        # Construct the signature
+        signature = f"{func_name}{args}{return_type}"
+        
+        # Extract docstring if available
+        docstring = ast.get_docstring(node)
+        
+        # Extract decorators if available
+        decorators = []
+        for decorator in node.decorator_list:
+            decorators.append(ast.unparse(decorator))
+        
+        # Return a dictionary with the signature as key and additional information
+        return {
+            "method_signature": signature,
+            "name": func_name,
+            "docstring": docstring,
+            "decorators": decorators,
+            "is_async": isinstance(node, ast.AsyncFunctionDef)
+        }
+
+    def _extract_class_definition(self, node: ast.ClassDef) -> Dict[str, Any]:
+        """
+        Handle class definitions and extract relevant information.
+        Args:
+            node (ast.ClassDef): The AST node representing a class definition.
+        Returns:
+            List[str]: A list of strings representing the class definition.
+        """
+        class_name = node.name
+        class_vars = {"inputs": {}, "outputs": {}, "display_name": None, "name": None}
+
+        # Extract class-level variables
+        for stmt in node.body:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        if target.id in {"inputs", "outputs"}:
+                            class_vars[target.id] = ast.unparse(stmt.value)
+                        elif target.id == "display_name":
+                            class_vars["display_name"] = ast.literal_eval(stmt.value)
+                        elif target.id == "name":
+                            class_vars["name"] = ast.literal_eval(stmt.value)
+
+        # Add to structured content
+        return {
+            "class_name": class_name,
+            "docstring": ast.get_docstring(node),
+            "inputs": class_vars["inputs"],
+            "outputs": class_vars["outputs"],
+            "display_name": class_vars["display_name"],
+            "name": class_vars["name"],
+        }
+
 
     def should_include_node(self, node: ast.AST) -> bool:
         """
@@ -626,5 +614,113 @@ class AsyncPythonSourceParser(BaseAsyncParser):
         # Check if the node has a name attribute and if it starts with an underscore
         return hasattr(node, "name") and not node.name.startswith("_")
     
-    
-    
+class AsyncPythonSampleParser(BaseAsyncParser):
+        """
+        Asynchronous parser for Python code samples.
+        
+        Extracts complete function definitions with their docstrings as independent chunks.
+        Each function is treated as a standalone sample without resolving dependencies.
+        
+        Attributes:
+            delay (float): Delay between operations to prevent resource exhaustion.
+            parsed_count (int): Counter for number of parsed functions.
+        """
+        
+        async def _get_content(self, path_str: str) -> Optional[Path]:
+            """
+            Validate and return the Python file path object.
+            
+            Args:
+                path_str (str): String representation of the file path.
+                
+            Returns:
+                Optional[Path]: Path object if valid, empty string otherwise.
+            """
+            path = Path(path_str)
+            if not path.exists() or not path.is_file() or path.suffix != ".py":
+                logger.error(f"Invalid Python file path: {path_str}")
+                return ""
+            else:
+                return path
+        
+        async def _parse_content(self, path: Path) -> Dict[str, str]:
+            """
+            Parse Python source code into independent function samples.
+            
+            Extracts complete function definitions including docstrings and 
+            returns them as individual samples.
+            
+            Args:
+                path (Path): Path to the Python file.
+                
+            Returns:
+                Dict[str, str]: Dictionary mapping function names to their code.
+            """
+            structured_content = {}
+            try:
+                # Read the file content once
+                with path.open("r", encoding="utf-8") as file:
+                    content = file.read()
+                
+                # Parse the file content into an AST
+                tree = ast.parse(content, filename=str(path))
+                
+                # Split content into lines for extraction
+                lines = content.splitlines()
+                
+                # Extract all functions
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and self.should_include_node(node):
+                        # Get function code
+                        start_line = node.lineno - 1
+                        end_line = node.end_lineno
+                        function_code = "\n".join(lines[start_line:end_line])
+                        
+                        # Create a unique key for this function
+                        key = f"{path.name}::{node.name}"
+                        
+                        # Get docstring
+                        docstring = ast.get_docstring(node)
+                        
+                        # Store function with information about its source
+                        structured_content[key] = {
+                            "code": function_code,
+                            "docstring": docstring,
+                            "name": node.name,
+                            "is_async": isinstance(node, ast.AsyncFunctionDef),
+                        }
+                
+                self.parsed_count += len(structured_content)
+                logger.info(f"Extracted {len(structured_content)} function samples from {path.name}")
+                
+            except Exception as e:
+                logger.error(f"Error parsing Python code samples from {path}: {e}")
+                import traceback
+                logger.error(f"Call stack:\n{traceback.format_exc()}")
+                
+            return structured_content
+        
+        def should_include_node(self, node: ast.AST) -> bool:
+            """
+            Determine if a node should be included in the extraction.
+            
+            Excludes private methods (starting with underscore) and special methods.
+            
+            Args:
+                node (ast.AST): The AST node to check.
+                
+            Returns:
+                bool: True if the node should be included, False otherwise.
+            """
+            if not hasattr(node, "name"):
+                return False
+                
+            # Skip private methods and special methods
+            if node.name.startswith("_"):
+                return False
+                
+            # Only include function definitions
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return False
+                
+            return True   

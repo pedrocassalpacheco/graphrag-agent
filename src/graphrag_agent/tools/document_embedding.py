@@ -21,7 +21,7 @@ class BaseAsyncEmbeddingGenerator:
         self.embedding_key = embedding_key
         self.processed_count = 0
     
-    async def initialize_model(self):
+    async def _initialize_model(self):
         """Initialize the embedding model (to be implemented by subclasses)."""
         raise NotImplementedError("Subclasses must implement this method")
     
@@ -72,8 +72,7 @@ class BaseAsyncEmbeddingGenerator:
             input: Queue containing documents to process
             output: Destination for processed documents (queue, dict, or file)
         """
-        # Initialize the model if not already done
-        await self.initialize_model()
+        # Remove explicit initialization - it will happen lazily
         
         while True:
             document = await input.get()
@@ -248,8 +247,8 @@ class OpenAIEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
         self.client = None
         self.max_text_length = max_text_length
     
-    async def initialize_model(self):
-        """Initialize the OpenAI client."""
+    async def _initialize_model(self):
+        """Initialize the OpenAI client (private method)."""
         if self.client is None:
             try:
                 logger.info(f"Initializing OpenAI client for model: {self.model_name}")
@@ -266,7 +265,11 @@ class OpenAIEmbeddingGenerator(BaseAsyncEmbeddingGenerator):
                 raise
     
     async def _generate_embedding(self, text: str) -> List[float]:
-        """Generate an embedding using OpenAI API."""
+        """Generate an embedding using OpenAI API with lazy initialization."""
+        # Add lazy initialization
+        if self.client is None:
+            await self._initialize_model()
+            
         if not text.strip():
             # Return a zero vector of appropriate size for empty text
             return [0.0] * self.dimensions

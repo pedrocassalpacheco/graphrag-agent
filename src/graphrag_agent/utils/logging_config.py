@@ -49,7 +49,7 @@ def get_file_logger(name, log_file=None):
     # Create default log filename with timestamp if not provided
     if log_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = log_dir / f"{name}_{timestamp}.log"
+        log_file = f"{name}_{timestamp}.log"
     else:
         log_file = Path(log_file)
 

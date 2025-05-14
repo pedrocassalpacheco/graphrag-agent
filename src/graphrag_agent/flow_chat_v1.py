@@ -132,9 +132,11 @@ async def initialize_vector_stores():
 def transform_documentation(results):
     """Format documentation content (already in string format)."""
     formatted_contents = [
-        result.get("content", "[Missing content]") for result in results
+        f"Component name: {result.get('title', '[No Title]')}\n\n"
+        f"{result.get('content', '[Missing content]')}\n\n"
+        for result in results
     ]
-    return "### Documentation\n" + "\n\n".join(formatted_contents)
+    return "" + "\n\n".join(formatted_contents)
 
 
 def transform_components(results):
@@ -155,10 +157,10 @@ def transform_components(results):
         component_info = f"Component: {class_name}\nName: {name}\nInputs: {inputs}"
         formatted_contents.append(component_info)
 
-    return "### Component Information\n" + "\n\n".join(formatted_contents)
+    return "" + "\n\n".join(formatted_contents)
 
 
-def transform_sample_code(results):
+def transform_sample_code(results, add_docstring: bool = False):
     """Format sample code (extract code and docstring)."""
     formatted_contents = []
     for result in results:
@@ -172,10 +174,12 @@ def transform_sample_code(results):
         docstring = content.get("docstring", "[No docstring]")
 
         # Combine code and docstring
-        sample = f"```python\n{code}\n```\n\nDocstring:\n{docstring}"
+        sample = f"```python\n{code}\n```" + (
+            f"\n\nDocstring:\n{docstring}" if add_docstring else ""
+        )
         formatted_contents.append(sample)
 
-    return "### Code Examples\n" + "\n\n".join(formatted_contents)
+    return "" + "\n\n".join(formatted_contents)
 
 
 async def get_context_for_query(query):
@@ -215,6 +219,7 @@ async def generate_flow(prompt):
 
     # Add the current prompt
     MESSAGES.append({"role": "user", "content": prompt})
+    logger.debug(f"Sending {len(MESSAGES)} messages to LLM")
 
     try:
         response = await client.chat.completions.create(
@@ -236,22 +241,22 @@ async def generate_flow(prompt):
         logger.error(traceback.format_exc())
 
         # Write error information to a log.err file
-        with open("log.err", "a") as error_log:
-            file_logger.error("Error querying OpenAI:\n")
-            file_logger.error("{e}\n")
-            file_logger.error("Traceback:\n")
-            file_logger.error(traceback.format_exc())
-            file_logger.error("\nMESSAGES:\n")
-            for i, msg in enumerate(MESSAGES):
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
+        file_logger.error("Error querying OpenAI:\n")
+        file_logger.error("{e}\n")
+        file_logger.error("Traceback:\n")
+        file_logger.error(traceback.format_exc())
+        file_logger.error("\n" + "=" * 80)
+        file_logger.error("\nMESSAGE:\n")
+        for i, msg in enumerate(MESSAGES):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
 
-                # Write role header
-                file_logger.error(f"\n--- MESSAGE #{i+1}: {role} ---\n")
+            # Write role header
+            file_logger.error(f"\nRole #{i+1}: {role} \n")
 
-                # Write content with original formatting preserved
-                file_logger.error(f"{content}\n")
-                file_logger.error("\n======================\n")
+            # Write content with original formatting preserved
+            file_logger.error(f"{content}\n")
+        file_logger.error("\nMESSAGE:\n")
 
 
 #################################
@@ -274,7 +279,7 @@ async def one_shot_flow_gen(query: str):
     )
 
     # Send to OpenAI
-    logger.info("fPrompting LLM for {query}")
+    logger.info(f"Prompting LLM for {query}")
     llm_response = await generate_flow(prompt)
 
     logger.info("\n" + "=" * 80)
@@ -335,7 +340,12 @@ async def interactive_flow_gen():
 
 if __name__ == "__main__":
     # Run the interactive version
-    initial_message = MESSAGES
+    import copy
+    import asyncio
+
+    initial_message = copy.deepcopy(MESSAGES)
 
     for i in range(5):
         asyncio.run(one_shot_flow_gen(random.choice(GOOD_FLOWS)))
+        sleep(1)
+        MESSAGES = copy.deepcopy(initial_message)

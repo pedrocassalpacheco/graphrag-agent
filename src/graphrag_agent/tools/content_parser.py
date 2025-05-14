@@ -685,36 +685,33 @@ class AsyncPythonSampleParser(BaseAsyncParser):
             return path
 
     async def _parse_content(self, path: Path) -> Dict[str, str]:
-        """
-        Parse Python source code into independent function samples.
-
-        Extracts complete function definitions including docstrings and
-        returns them as individual samples.
-
-        Args:
-            path (Path): Path to the Python file.
-
-        Returns:
-            Dict[str, str]: Dictionary mapping function names to their code.
-        """
-        structured_content = {}
         try:
-            # Read the file content once
-            with path.open("r", encoding="utf-8") as file:
-                content = file.read()
+            # Read the file content
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
 
-            # Parse the file content into an AST
-            tree = ast.parse(content, filename=str(path))
-
-            # Split content into lines for extraction
+            # Parse the AST
+            tree = ast.parse(content)
             lines = content.splitlines()
 
-            # Extract all functions
+            # First, collect all imports
+            imports = []
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    start_line = node.lineno - 1
+                    end_line = getattr(node, "end_lineno", start_line + 1)
+                    import_code = "\n".join(lines[start_line:end_line])
+                    imports.append(import_code)
+
+            # Join all imports
+            all_imports = "\n".join(imports)
+
+            # Now process functions with imports included
+            structured_content = {}
             for node in ast.walk(tree):
                 if isinstance(
                     node, (ast.FunctionDef, ast.AsyncFunctionDef)
                 ) and self.should_include_node(node):
-                    # Get function code
                     start_line = node.lineno - 1
                     end_line = node.end_lineno
                     function_code = "\n".join(lines[start_line:end_line])
@@ -725,9 +722,11 @@ class AsyncPythonSampleParser(BaseAsyncParser):
                     # Get docstring
                     docstring = ast.get_docstring(node)
 
-                    # Store function with information about its source
+                    # Store function with imports and information about its source
                     structured_content[key] = {
-                        "code": function_code,
+                        "code": all_imports + "\n\n" + function_code,
+                        "raw_code": function_code,  # Store original code without imports too
+                        "imports": all_imports,
                         "docstring": docstring,
                         "name": node.name,
                         "is_async": isinstance(node, ast.AsyncFunctionDef),
@@ -737,14 +736,11 @@ class AsyncPythonSampleParser(BaseAsyncParser):
             logger.info(
                 f"Extracted {len(structured_content)} function samples from {path.name}"
             )
+            return structured_content
 
         except Exception as e:
-            logger.error(f"Error parsing Python code samples from {path}: {e}")
-            import traceback
-
-            logger.error(f"Call stack:\n{traceback.format_exc()}")
-
-        return structured_content
+            logger.error(f"Error parsing {path}: {e}")
+            return {}
 
     def should_include_node(self, node: ast.AST) -> bool:
         """

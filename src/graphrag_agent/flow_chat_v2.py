@@ -15,6 +15,11 @@ from graphrag_agent.utils.logging_config import get_logger, get_file_logger
 from graphrag_agent.tools.code_validation import validate_code
 from graphrag_agent.utils.utils import count_tokens
 
+# Add these imports at the top of your file
+from selenium.webdriver.common.by import By
+from graphrag_agent.tools.browser_automation import BrowserAutomation
+
+
 # Load environment variables
 load_dotenv()
 
@@ -148,7 +153,22 @@ def transform_sample_code(results, add_docstring=False):
 
 
 def transform_llm_response(llm_response: str):
-    if "```python" in llm_response:
+    """
+    Extract Python code from LLM response, handling both markdown code blocks and direct code.
+
+    Args:
+        llm_response: The raw response from the LLM
+
+    Returns:
+        str: The extracted Python code
+    """
+    # Check if empty or None
+    if not llm_response:
+        logger.warning("Empty response received")
+        return ""
+
+    # Case 1: Extract code from markdown blocks if present
+    if "```" in llm_response:
         import re
 
         code_blocks = re.findall(r"```(?:python)?\s*([\s\S]*?)```", llm_response)
@@ -156,6 +176,25 @@ def transform_llm_response(llm_response: str):
             extracted_code = code_blocks[0].strip()
             logger.info("Extracted code from markdown")
             return extracted_code
+
+    # Case 2: Check if the response is already Python code
+    if any(
+        python_indicator in llm_response
+        for python_indicator in [
+            "import ",
+            "from ",
+            "def ",
+            "class ",
+            "# ",
+            "if __name__",
+        ]
+    ):
+        logger.info("Response appears to be direct Python code")
+        return llm_response.strip()
+
+    # Case 3: Unknown format, return as is with warning
+    logger.warning("Could not identify clear Python code in response")
+    return llm_response.strip()
 
 
 class FlowGenerator:
@@ -169,6 +208,7 @@ class FlowGenerator:
         self.langflow_docs: Optional[AsyncAstraDBRepository] = None
         self.component_code: Optional[AsyncAstraDBRepository] = None
         self.sample_code: Optional[AsyncAstraDBRepository] = None
+        self.current_flow: Optional[str] = None
 
         # Initialize message history with system message
         self.messages: List[Dict[str, str]] = [SYSTEM_MESSAGE]
@@ -244,7 +284,7 @@ class FlowGenerator:
         )
 
         # Format sections
-        logger.info("Formatting results")
+        logger.info("Formating context for better prompting ...")
         documentation_section = transform_documentation(langflow_doc_results)
         components_section = transform_components(component_code_results)
         sample_code_section = transform_sample_code(sample_code_results)
@@ -272,6 +312,14 @@ class FlowGenerator:
 
             # Isolate the code from the response
             flow_code = transform_llm_response(response_content)
+
+            logger.debug(f"LLM response: {flow_code}")
+
+            logger.info("Validating response ...")
+            flow_code, _ = await self._validate_and_correct_code(
+                flow_code, prompt, max_attempts=3
+            )
+
             # Update conversation history
             self.messages.append({"role": "assistant", "content": flow_code})
 
@@ -417,6 +465,57 @@ class FlowGenerator:
         )
         return current_code, validation_result
 
+        # Add this method to your FlowGenerator class
+        async def launch_browser_automation(self, flow_code=None):
+            """
+            Launch browser automation to visualize the flow in the Langflow UI.
+
+            Args:
+                flow_code: Optional flow code to visualize
+            """
+            logger.info("Launching browser automation...")
+
+            # Create browser automation instance
+            browser = BrowserAutomation(headless=False)  # Set to True to run invisibly
+
+            try:
+                # Start browser and navigate to localhost
+                browser.start("http://localhost:3000/flows")
+
+                # Wait for page to load
+                time.sleep(5)
+
+                # Click the "Create first flow" button
+                browser.click_element("new-project-btn", By.ID)
+                time.sleep(5)
+
+                # Click the "blank flow" button
+                browser.click_element("[data-testid='blank-flow']")
+                time.sleep(5)
+
+                # If flow_code is provided, you could potentially parse it to add appropriate components
+                # For now, just add a Text Input component as an example
+                browser.input_text("[data-testid='sidebar-search-input']", "TextInput")
+                time.sleep(5)
+                browser.click_element("[data-testid='add-component-button-text-input']")
+
+                # Print instructions
+                print("\nBrowser is open with Langflow UI.")
+                print("The automation has added a TextInput component.")
+                print(
+                    "Press Enter to close the browser and return to the conversation."
+                )
+
+                # Wait for user to press Enter
+                input()
+
+            except Exception as e:
+                logger.error(f"Error in browser automation: {e}")
+                print(f"Error launching browser: {e}")
+            finally:
+                # Close the browser when done
+                browser.close()
+
     async def one_shot_flow_gen(self, query):
         """Generate code flow based on query (non-interactive mode)."""
         # Get context information
@@ -435,56 +534,97 @@ class FlowGenerator:
         # Send to OpenAI
         logger.info(f"Prompting LLM for {query}")
         llm_response = await self.generate_flow(prompt)
-        logger.debug(f"LLM response before transformation:")
-        print(llm_response)
+
         # Removes any additions made by the LLM that is not valid python code
         flow_code = transform_llm_response(llm_response)
-        logger.debug(f"LLM response after transformation:")
-        print(flow_code)
 
         flow_code, _ = await self._validate_and_correct_code(flow_code, query)
-        logger.info("\n" + "=" * 80)
-        logger.info("LLM RESPONSE:")
-        logger.info("=" * 80)
-        print(flow_code)
-        logger.info("=" * 80)
-
-        # Save the flow to a file
-        logger.info("Saving flow to file...")
-        filename = self._save_flow_to_file(flow_code)
 
         return flow_code
 
-    async def interactive_flow_gen(self):
-        """Interactive flow generation with continuous feedback loop."""
+    def _title_screen(self):
         # Get initial query from user
-        query = input("What kind of flow would you like to build? ")
-        logger.info("Thinking...")
+        from rich.padding import Padding
+        from rich.panel import Panel
+        from rich.text import Text
+        from rich.box import Box, DOUBLE, ROUNDED, HEAVY
+        from rich.console import Console
+        from rich.align import Align
+
+        console = Console()
+
+        title_text = Text()
+        title_text.append("✨ ", style="yellow")
+        title_text.append("Chat Console ", style="bold cyan")
+        title_text.append(
+            "(Type 'exit' to end, 'reset' to get new context):",
+            style="bold white on red",
+        )
+        title_text.append(" ✨", style="yellow")
+
+        console.print(
+            Panel(
+                Align.center(title_text),
+                box=ROUNDED,
+                border_style="green",
+                title="Welcome",
+                subtitle="Version 1.0",
+            )
+        )
+
+    def _input_query(self):
+        # Get initial query from user
+        from rich.prompt import Prompt
+
+        while True:
+            # Prompt for user input
+            query = Prompt.ask(
+                "What kind of flow would you like to build?",
+                default="",
+                show_default=False,
+                show_choices=False,
+            )
+
+            # Check for exit or reset commands
+            if query.lower() == "exit":
+                logger.info("Goodbye!")
+                import sys
+
+                sys.exit(0)
+            elif query.lower() == "reset":
+                logger.info("Refreshing context...")
+                self.reset_conversation()
+            elif query.strip():
+                return query
+
+    async def interactive_flow_gen(self):
+        self._title_screen()
+        """Interactive flow generation with continuous feedback loop."""
+        query = self._input_query()
 
         # Get initial context
+        logger.info("\tBuilding context...")
         documentation_section, components_section, sample_code_section = (
             await self.get_context_for_query(query)
         )
 
+        prompt = None
         while True:
             try:
-                # Format prompt using global template
-                prompt = PROMPT_TEMPLATE.format(
-                    documentation_section=documentation_section,
-                    components_section=components_section,
-                    sample_code_section=sample_code_section,
-                    query=query,
-                )
-
                 # Send to OpenAI
-                logger.info(f"Prompting LLM for {query}")
-                llm_response = await self.generate_flow(prompt)
+                logger.info(f"Building prompt ...")
+                if not prompt:
+                    prompt = PROMPT_TEMPLATE.format(
+                        documentation_section=documentation_section,
+                        components_section=components_section,
+                        sample_code_section=sample_code_section,
+                        query=query,
+                    )
+                else:
+                    prompt = query
 
-                # Removes any additions made by the LLM that is not valid python code
-                flow_code = transform_llm_response(llm_response)
-
-                # Ensure the code is valid Python
-                flow_code, _ = await self._validate_and_correct_code(flow_code, query)
+                logger.info(f"Thinking ...")
+                flow_code = await self.generate_flow(prompt)
 
                 logger.info("\n" + "=" * 80)
                 logger.info("LLM RESPONSE:")
@@ -493,24 +633,35 @@ class FlowGenerator:
                 logger.info("=" * 80)
 
                 # Prompt for feedback or follow-up
-                feedback = input(
-                    "\nAny feedback or follow-up questions? (Type 'exit' to end, 'reset' to get new context): "
-                )
-
-                if feedback.lower() == "exit":
-                    logger.info("Ending conversation. Goodbye!")
-                    break
-                elif feedback.lower() == "reset":
-                    logger.info("Refreshing context...")
-                    self.reset_conversation()
-                    query = input("What's your new query for refreshed context? ")
-                    # Get fresh context
-                    documentation_section, components_section, sample_code_section = (
-                        await self.get_context_for_query(query)
+                while True:
+                    feedback = input(
+                        "\nAny feedback or follow-up questions? (Type 'exit' to end, 'reset' to get new context): "
                     )
-                else:
-                    # Use feedback directly as the next query
-                    query = feedback
+
+                    if feedback.lower() == "exit":
+                        logger.info("Ending conversation. Goodbye!")
+                        import sys
+
+                        sys.exit(0)
+                    elif feedback.lower() == "reset":
+                        logger.info("Refreshing context...")
+                        self.reset_conversation()
+                        query = input("What's your new query for refreshed context? ")
+                        # Get fresh context
+                        (
+                            documentation_section,
+                            components_section,
+                            sample_code_section,
+                        ) = await self.get_context_for_query(query)
+                        break
+                    elif feedback.startswith("save"):
+                        self._save_flow_to_file(flow_code)
+                    elif feedback.startswith("plot"):
+                        # Launch browser automation to visualize the flow
+                        await self.launch_browser_automation(flow_code)
+                    else:
+                        # Use feedback directly as the next query
+                        query = feedback
 
             except Exception as e:
                 logger.error(f"Error during interactive session: {e}")
@@ -518,6 +669,9 @@ class FlowGenerator:
                 feedback = input("\nAn error occurred. Try again? (y/n): ")
                 if feedback.lower() != "y":
                     break
+        # Save the final flow code to a file
+
+        self._save_flow_to_file(flow_code)
 
 
 # Updated main block using the class
@@ -526,22 +680,7 @@ if __name__ == "__main__":
     async def run_flow_tests():
         # Create flow generator instance
         generator = FlowGenerator()
-
-        # Run 5 flows with different prompts
-        for i in range(5):
-            # Reset conversation for each run
-            generator.reset_conversation()
-
-            # Pick a random flow
-            query = random.choice(GOOD_FLOWS)
-            logger.info(f"Run {i+1}/5: Testing query: {query}")
-
-            # Generate flow
-            await generator.one_shot_flow_gen(query)
-
-            # Add a pause between runs
-            await asyncio.sleep(0.5)
-            break
+        await generator.interactive_flow_gen()
 
     # Add this line to actually run the async function
     asyncio.run(run_flow_tests())

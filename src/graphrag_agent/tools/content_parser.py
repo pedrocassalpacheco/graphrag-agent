@@ -766,3 +766,56 @@ class AsyncPythonSampleParser(BaseAsyncParser):
             return False
 
         return True
+
+
+class PythonAPIExtractor(AsyncPythonComponentParser):
+    """Extracts class API details without implementation code."""
+
+    async def _parse_content(self, path: Path) -> Dict[str, Dict[str, Any]]:
+        """Parse Python file to extract only API-level details."""
+        api_structure = {}
+
+        try:
+            # Read file once
+            with path.open("r", encoding="utf-8") as file:
+                content = file.read()
+
+            # Parse AST
+            tree = ast.parse(content, filename=str(path))
+
+            # Extract classes and their methods
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    class_name = node.name
+                    class_key = f"{path.name}::{class_name}"
+
+                    # Basic class info
+                    api_structure[class_key] = {
+                        "name": class_name,
+                        "docstring": ast.get_docstring(node),
+                        "methods": {},
+                        "constructor": None,
+                        "base_classes": [ast.unparse(base) for base in node.bases],
+                    }
+
+                    # Extract methods
+                    for method_node in node.body:
+                        if isinstance(
+                            method_node, (ast.FunctionDef, ast.AsyncFunctionDef)
+                        ):
+                            method_info = self._extract_function_signature(method_node)
+
+                            # Special handling for constructor
+                            if method_node.name == "__init__":
+                                api_structure[class_key]["constructor"] = method_info
+                            else:
+                                api_structure[class_key]["methods"][
+                                    method_node.name
+                                ] = method_info
+
+            self.parsed_count += len(api_structure)
+            return api_structure
+
+        except Exception as e:
+            logger.error(f"Error extracting API from {path}: {e}")
+            return {}

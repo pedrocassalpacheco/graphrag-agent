@@ -369,35 +369,3 @@ class BrowserAutomation:
                 logger.error(f"Error closing browser: {str(e)}")
             finally:
                 self.driver = None
-
-
-# Usage example
-if __name__ == "__main__":
-    # Create browser automation instance
-    browser = BrowserAutomation(headless=False)
-
-    try:
-        # Start browser and navigate to localhost:3000
-        if browser.start("http://localhost:3000/"):
-            # Wait for page to load
-            time.sleep(2)
-
-            # Example interactions
-            # Click a button
-            browser.click_element("button.start", By.CSS_SELECTOR)
-
-            # Input text
-            browser.input_text("input[name='query']", "Sample query")
-
-            # Get text from an element
-            result = browser.get_text(".result-container")
-            print(f"Result: {result}")
-
-            # Take a screenshot
-            browser.take_screenshot("localhost_capture.png")
-
-            # Wait for user to see the browser
-            time.sleep(5)
-    finally:
-        # Always close the browser
-        browser.close()

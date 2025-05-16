@@ -1,0 +1,1 @@
+ /Users/pedropacheco/Projects/dev/graphrag-agent/.venv/bin/python /Users/pedropacheco/Projects/dev/graphrag-agent/src/graphrag_agent/flow_chat_v2.py

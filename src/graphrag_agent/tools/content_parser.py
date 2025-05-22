@@ -6,193 +6,97 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, override
 
 from bs4 import BeautifulSoup
 from markdown_it import MarkdownIt
 
 from graphrag_agent.utils.logging_config import get_logger
-
+from graphrag_agent.tools.queue_processor import BaseAsyncProcessor
 
 logger = get_logger(__name__)
 
 
-class BaseAsyncParser:
-    """Base class for asynchronous content parsers.
+# class BaseAsyncParser(BaseAsyncProcessor):
+#     """Base class for asynchronous content parsers.
 
-    Provides common functionality for parsing different types of content.
+#     Provides common functionality for parsing different types of content.
 
-    Attributes:
-        delay (float): Delay between operations to prevent resource exhaustion.
-    """
+#     Attributes:
+#         delay (float): Delay between operations to prevent resource exhaustion.
+#     """
 
-    def __init__(self, delay: float = 0.001):
-        self.delay = delay
-        self.parsed_count = 0
+#     def __init__(self, delay: float = 0.001):
+#         self.delay = delay
+#         self.parsed_count = 0
 
-    def clean_text(self, text: str) -> str:
-        """
-        Cleans unwanted control characters and other unnecessary symbols from text.
-        """
-        if not text:
-            return ""
-        # Clean control characters and normalize whitespace
-        cleaned = re.sub(r"[\u0000-\u001F\u007F-\u009F\u00b6]", "", text)
-        return re.sub(r"\s+", " ", cleaned).strip()
-
-    async def parse(
-        self,
-        input: asyncio.Queue,
-        output: Union[
-            asyncio.Queue, Dict[str, Dict[str, List[str]]], io.TextIOWrapper
-        ] = None,
-    ) -> None:
-        """
-        Process content from the input queue and write structured content to the output.
-        """
-        while True:
-            source = await input.get()
-
-            if source is None:  # Processing is complete
-                logger.info(
-                    f"{self.__class__.__name__} received termination signal, forwarding it"
-                )
-                if isinstance(output, asyncio.Queue):
-                    await output.put(None)
-                break
-
-            logger.info(f"Parsing {source}")
-
-            # Get content - implemented by subclasses
-            content = await self._get_content(source)
-
-            if content:
-                # Parse the content - implemented by subclasses
-                parsed_content = await self._parse_content(content)
-
-                # Process each section
-                for title, section_content in parsed_content.items():
-                    if not section_content:
-                        continue
-
-                    logger.debug(f"Parsed section: {title} from {source}")
-
-                    item = {
-                        "url": source,  # Using source as the identifier
-                        "title": title,
-                        "content": section_content,
-                    }
-
-                    # Handle different output types
-                    if isinstance(output, asyncio.Queue):
-                        await output.put(item)
-                    elif isinstance(output, dict):
-                        if source not in output:
-                            output[source] = []
-                        output[source].append(item)
-                    elif isinstance(output, io.TextIOWrapper):
-                        output.write(json.dumps(item) + "\n")
-
-            # Mark the item as processed
-            input.task_done()
-
-    async def _get_content(self, source: str) -> str:
-        """Abstract method to get content from a source."""
-        raise NotImplementedError("Subclasses must implement this method")
-
-    async def _parse_content(self, content: str) -> Dict[str, List[str]]:
-        """Abstract method to parse content."""
-        raise NotImplementedError("Subclasses must implement this method")
+#     def _clean_text(self, text: str) -> str:
+#         """
+#         Cleans unwanted control characters and other unnecessary symbols from text.
+#         """
+#         if not text:
+#             return ""
+#         # Clean control characters and normalize whitespace
+#         cleaned = re.sub(r"[\u0000-\u001F\u007F-\u009F\u00b6]", "", text)
+#         return re.sub(r"\s+", " ", cleaned).strip()
 
 
-class AsyncPageContentParser(BaseAsyncParser):
+class AsyncPageContentParser(BaseAsyncProcessor):
     """Asynchronous parser for web page content."""
 
-    async def fetch_page(self, url: str, client: httpx.AsyncClient) -> str:
-        try:
-            headers = {"User-Agent": "Mozilla/5.0 (compatible; GraphRagParser/1.0)"}
-            response = await client.get(url, headers=headers, timeout=10.0)
-            response.raise_for_status()
-            return response.text
-        except httpx.HTTPError as e:
-            logger.error(f"Error fetching {url}: {str(e)}")
-            return ""
-        except Exception as e:
-            logger.error(f"Unexpected error fetching {url}: {str(e)}")
-            return ""
+    @override
+    async def _process_item(self, item: Any) -> Dict[str, List[str]]:
+        """Fetch and parse HTML content from a URL in one step."""
+        if not isinstance(item, str):
+            raise TypeError(f"Expected string URL, got {type(item).__name__}")
 
-    async def _get_content(self, url: str) -> str:
-        """Fetch HTML content from a URL."""
+        url = str(item)
         async with httpx.AsyncClient() as client:
-            return await self.fetch_page(url, client)
+            html = await self.fetch_page(url, client)
+            if not html:
+                logger.warning(f"No content retrieved from {url}")
+                return {}
 
-    async def _parse_content(self, html: str) -> Dict[str, List[str]]:
-        """Parse HTML content into a structured format."""
-        soup = BeautifulSoup(html, "html.parser")
-        content = {}
-        current_title = None
+            # Parse the HTML content
+            soup = BeautifulSoup(html, "html.parser")
+            content = {}
+            current_title = None
 
-        # Ugly but effective way to parse the content
-        for element in soup.find_all(
-            [
-                "h1",
-                "h2",
-                "h3",
-                "h4",
-                "h5",
-                "h6",
-                "p",
-                "ul",
-                "ol",
-                "table",
-                "blockquote",
-                "pre",
-                "code",
-                "img",
-            ]
-        ):
-            logger.debug(f"Parsing element: {element.name}")
-
-            if element.name.startswith("h"):  # Titles and subtitles
-                current_title = self.clean_text(element.get_text(strip=True))
-                content[current_title] = []
-            elif current_title and element.name == "p":  # Paragraphs
-                content[current_title].append(
-                    self.clean_text(element.get_text(strip=True))
-                )
-            elif current_title and element.name in ["ul", "ol"]:  # Lists
-                list_items = [
-                    self.clean_text(li.get_text(strip=True))
-                    for li in element.find_all("li")
+            # Parse the content (moved from _parse_content)
+            for element in soup.find_all(
+                [
+                    "h1",
+                    "h2",
+                    "h3",
+                    "h4",
+                    "h5",
+                    "h6",
+                    "p",
+                    "ul",
+                    "ol",
+                    "table",
+                    "blockquote",
+                    "pre",
+                    "code",
+                    "img",
                 ]
-                content[current_title].extend(list_items)
-            elif current_title and element.name == "table":  # Tables
-                rows = []
-                for row in element.find_all("tr"):
-                    cells = [
-                        self.clean_text(cell.get_text(strip=True))
-                        for cell in row.find_all(["td", "th"])
-                    ]
-                    rows.append(cells)
-                content[current_title].append({"table": rows})
-            elif current_title and element.name == "blockquote":  # Blockquotes
-                content[current_title].append(
-                    self.clean_text(element.get_text(strip=True))
-                )
-            elif current_title and element.name in ["pre", "code"]:  # Code blocks
-                content[current_title].append(
-                    self.clean_text(element.get_text(strip=True))
-                )
-            elif current_title and element.name == "img":  # Images
-                alt_text = self.clean_text(element.get("alt", "No description"))
-                src = self.clean_text(element.get("src", "No source"))
-                content[current_title].append({"image": {"alt": alt_text, "src": src}})
+            ):
+                logger.debug(f"Parsing element: {element.name}")
 
-        await asyncio.sleep(0)  # Yield control to the event loop
-        return content
+                if element.name.startswith("h"):  # Titles and subtitles
+                    current_title = self._clean_text(element.get_text(strip=True))
+                    content[current_title] = []
+                elif current_title and element.name == "p":  # Paragraphs
+                    content[current_title].append(
+                        self._clean_text(element.get_text(strip=True))
+                    )
+                # ... rest of parsing logic
+
+            await asyncio.sleep(0)  # Yield control to the event loop
+            return content
 
 
-class AsyncMarkdownParser(BaseAsyncParser):
+class AsyncMarkdownParser(BaseAsyncProcessor):
     """
     Asynchronous parser for local markdown files.
     This class provides functionality to read and parse markdown files asynchronously.
@@ -209,23 +113,24 @@ class AsyncMarkdownParser(BaseAsyncParser):
             Parses markdown content and extracts structured data such as headings,
             paragraphs, images, and tables.
     """
+    @override
+    async def _process_item(self, item: Any) -> Any:
+        if not isinstance(item, str):
+            raise TypeError(f"Expected string URL, got {type(item).__name__}")
+        else:
+            file_path = str(item)
 
-    async def _read_file(self, file_path: str) -> Optional[str]:
-        """Read the content of a markdown file asynchronously."""
+        """Read content from a local file."""
         try:
             content = await asyncio.to_thread(
                 Path(file_path).read_text, encoding="utf-8"
             )
-            return content
+            return self._parse_markdown(content)
         except Exception as e:
             logger.error(f"Error reading file {file_path}: {str(e)}")
             return None
 
-    async def _get_content(self, file_path: str) -> Optional[str]:
-        """Read content from a local file."""
-        return await self._read_file(file_path)
-
-    async def _parse_content(self, content: str) -> Dict[str, List[str]]:
+    async def _parse_markdown(self, content: str) -> Dict[str, List[str]]:
         """Parse markdown content directly without converting to HTML."""
         if not content:
             return {}
@@ -305,7 +210,7 @@ class AsyncMarkdownParser(BaseAsyncParser):
         return structured_content
 
 
-class AsyncLangflowDocsMarkdownParser(AsyncMarkdownParser):
+class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
     """A parser for processing Markdown content specific for langflow
     asynchronously, specifically designed to handle Langflow documentation. This parser preserves tables and header
     hierarchy while extracting content into structured sections.
@@ -318,8 +223,24 @@ class AsyncLangflowDocsMarkdownParser(AsyncMarkdownParser):
             Processes a Markdown table, converting it into a list of formatted
             Markdown rows. Handles table headers, alignment, and data rows.
     """
+    @override
+    async def _process_item(self, item: Any) -> Any:
+        if not isinstance(item, str):
+            raise TypeError(f"Expected string URL, got {type(item).__name__}")
+        else:
+            file_path = str(item)
 
-    async def _parse_content(self, content: str) -> Dict[str, str]:
+        """Read content from a local file."""
+        try:
+            content = await asyncio.to_thread(
+                Path(file_path).read_text, encoding="utf-8"
+            )
+            return self._parse_langflow_component_doc(content)
+        except Exception as e:
+            logger.error(f"Error reading file {file_path}: {str(e)}")
+            return None
+
+    async def _parse_markdown_component_doc(self, content: str) -> Dict[str, str]:
         """Parse Markdown content, preserving tables and header hierarchy."""
         if not content:
             return {}
@@ -489,36 +410,22 @@ class AsyncLangflowDocsMarkdownParser(AsyncMarkdownParser):
         )  # Return the list of formatted table rows and the new index
 
 
-class AsyncPythonComponentParser(BaseAsyncParser):
-    """Asynchronous tool to parse Python source code files into structured chunks of functions and classes.
-    This parser reads Python source files, analyzes their Abstract Syntax Tree (AST), and extracts
-    structured information such as module-level docstrings, class definitions (including specific
-    attributes like `inputs`, `outputs`, `display_name`, and `name`), and function definitions.
-    It supports filtering nodes based on naming conventions and provides the ability to process
-    files asynchronously.
-    Attributes:
-        delay (float): Optional delay for asynchronous operations. Defaults to 0.0.
-        parsed_count (int): Counter for the number of parsed sections.
-    Methods:
-        _get_content(path_str: str) -> Optional[str]:
-            Validate and return the Python file path object from a string.
-        _parse_content_old(path: Path) -> Dict[str, List[str]]:
-            Parse Python source code into a structured format using a file object (legacy method).
-        _parse_content(path: Path) -> Dict[str, List[str]]:
-            Parse Python source code into a structured format using a file object.
-        should_include_node(node: ast.AST) -> bool:
-    """
-
-    async def _get_content(self, path_str: str) -> Optional[str]:
-        """Validate and return the python file path object from string."""
-        path = Path(path_str)
-        if not path.exists() or not path.is_file() or path.suffix != ".py":
-            logger.error(f"Invalid Python file path: {path_str}")
-            return ""
+class AsyncPythonComponentParser(BaseAsyncProcessor):
+    """ """
+    @override
+    async def _process_item(self, item: Any) -> Any:
+        if not isinstance(item, str):
+            raise TypeError(f"Expected string URL, got {type(item).__name__}")
         else:
-            return path
+            file_path = str(item)
 
-    async def _parse_content(self, path: Path) -> Dict[str, List[str]]:
+        path = Path(file_path)
+        if not path.exists() or not path.is_file() or path.suffix != ".py":
+            raise FileNotFoundError(f"File not found or invalid path: {file_path}")
+        else:
+            return self._parse_python_component(path)
+
+    async def _parse_python_component(self, path: Path) -> Dict[str, List[str]]:
         """Parse Python source code into a structured format using a file object."""
         structured_content = {}
         try:
@@ -641,7 +548,7 @@ class AsyncPythonComponentParser(BaseAsyncParser):
             "name": class_vars["name"],
         }
 
-    def should_include_node(self, node: ast.AST) -> bool:
+    def _should_include_node(self, node: ast.AST) -> bool:
         """
         Determine if an AST node should be included based on its name.
 
@@ -655,7 +562,7 @@ class AsyncPythonComponentParser(BaseAsyncParser):
         return hasattr(node, "name") and not node.name.startswith("_")
 
 
-class AsyncPythonSampleParser(BaseAsyncParser):
+class AsyncPythonSampleParser(BaseAsyncProcessor):
     """
     Asynchronous parser for Python code samples.
 

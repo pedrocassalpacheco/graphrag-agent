@@ -50,7 +50,7 @@ class BaseAsyncCrawler(ABC):
         Returns:
             Set[str]: A set of all file paths that were visited
         """
-        logger.info(f"Starting file scan from {current_path}")
+        logger.info(f"Starting scan from {current_path}")
 
         await self._run(current_path=current_path, depth=depth, output=output)
 
@@ -74,7 +74,7 @@ class BaseAsyncCrawler(ABC):
         pass
 
 
-class AsyncWebCrawler:
+class AsyncWebCrawler(BaseAsyncCrawler):
     """Asynchronous web crawler for extracting links and page content.
     This class crawls a given base URL, extracts links from the pages, and
     fetches their content concurrently. It can be configured to include or exclude
@@ -90,24 +90,23 @@ class AsyncWebCrawler:
 
     def __init__(
         self,
-        base_url: str,
+        base_path: str,
         max_depth: int = 2,
-        include_external: bool = False,
-        delay: float = 1.0,
+        delay: float = 0.001,
     ):
-        self.base_url = base_url
+        super().__init__(base_path)
         self.max_depth = max_depth
-        self.include_external = include_external
-        self.delay = delay  # Delay between requests in seconds
-        self.visited: Set[str] = set()
+        self.delay = delay
+        self.visited = set()
+        self.include_external = False
         self.lock = asyncio.Lock()
 
-    async def _fetch(self, url: str, client: httpx.AsyncClient) -> str:
+    async def _fetch(self, url: str) -> str:
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (compatible; GraphRagCrawler/1.0; +https://github.com/yourusername/graphrag)"
             }
-            response = await client.get(url, headers=headers, timeout=10.0)
+            response = await self.client.get(url, headers=headers, timeout=10.0)
             response.raise_for_status()
             return response.text
         except httpx.HTTPError as e:
@@ -117,77 +116,63 @@ class AsyncWebCrawler:
             logger.error(f"Unexpected error fetching {url}: {str(e)}")
             return None
 
-    def _extract_links(self, soup: BeautifulSoup, current_url: str) -> List[str]:
+    async def _extract_links(self, url: str) -> List[str]:
         links = []
-        logger.debug(f"Extracting links from {current_url}")
+        html = await self._fetch(url)
+        soup = BeautifulSoup(html, "html.parser")
+
+        logger.debug(f"Extracting links from {url}")
         for tag in soup.find_all("a", href=True):
             href = tag["href"]
-            joined_url = urljoin(current_url, href)
+            joined_url = urljoin(url, href)
             defragmented_url, _ = urldefrag(
                 joined_url
             )  # Remove the fragment part (e.g., #section1)
             parsed_url = urlparse(defragmented_url)
-            if (
-                not self.include_external
-                and parsed_url.netloc != urlparse(self.base_url).netloc
-            ):
+            if not self.include_external and parsed_url.netloc != urlparse(url).netloc:
                 continue
             if defragmented_url not in links:  # Avoid duplicates
                 links.append(defragmented_url)
         return links
 
-    async def crawl(
-        self, url: str, depth: int, client: httpx.AsyncClient, queue: asyncio.Queue
-    ):
+    async def _crawl(self, url: str, depth: int, queue: asyncio.Queue):
         logger.debug(f"Crawling {url} at depth {depth}")
+        try:
+            async with self.lock:  # Ensure thread-safe access to self.visited
+                if depth > self.max_depth or url in self.visited:
+                    logger.info(
+                        f"Skipping {url} - {'max depth reached' if depth > self.max_depth else 'already visited'}"
+                    )
+                    return
+                self.visited.add(url)
+                await queue.put(url)  # Add the URL to the queue
 
-        async with self.lock:  # Ensure thread-safe access to self.visited
-            if depth > self.max_depth or url in self.visited:
-                logger.info(
-                    f"Skipping {url} - {'max depth reached' if depth > self.max_depth else 'already visited'}"
-                )
-                return
-            self.visited.add(url)
+            # Fetch links from the page
+            links = await self._extract_links(url)
+            if links:
+                logger.debug(f"Found {len(links)} links on {url}")
 
-        # Add delay between requests
-        await asyncio.sleep(self.delay)
+                # Crawl the extracted links
+                tasks = [
+                    self._crawl(link, depth + 1, queue)
+                    for link in links
+                    if link not in self.visited
+                ]
+                await asyncio.gather(*tasks)
+        except Exception as e:
+            logger.error(f"Error crawling {url}: {str(e)}")
+            traceback.print_exc()
 
-        html = await self.fetch(url, client)
-        if not html:
-            logger.warning(f"Failed to fetch content from {url}")
-            return
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        links = self.extract_links(soup, url)
-        logger.debug(f"Found {len(links)} links on {url}")
-
-        # Add the current URL to the queue for parsing
-        await queue.put(url)
-
-        # Crawl the extracted links
-        tasks = [
-            self.crawl(link, depth + 1, client, queue)
-            for link in links
-            if link not in self.visited
-        ]
-        await asyncio.gather(*tasks)
-
-    async def _run(self, queue: asyncio.Queue):
-        """
-        Main entry point for the crawler. Initializes an async HTTP client and starts
-        the crawling process from the base URL.
-
-        Returns:
-            Set[str]: A set of all URLs that were visited during the crawl.
-        """
-        async with httpx.AsyncClient() as client:
-            logger.info(f"Starting crawl from {self.base_url}")
-            await self.crawl(self.base_url, 0, client, queue)  # Start from depth 0
-        await queue.put(None)  # Signal that crawling is complete
-        logger.info(f"Crawl completed. Visited {len(self.visited)} pages")
-        await queue.put(None)
-        return self.visited
+    async def _run(
+        self,
+        *,
+        current_path: Optional[str] = None,
+        depth: int = 0,
+        output: asyncio.Queue,
+    ) -> Set[str]:
+        self.client = httpx.AsyncClient()
+        logger.info(f"Starting crawl from {current_path}")
+        await self._crawl(current_path, 0, output)
 
 
 class AsyncFileSystemCrawler(BaseAsyncCrawler):
@@ -234,6 +219,10 @@ class AsyncFileSystemCrawler(BaseAsyncCrawler):
 
         # Recursively scan a directory for files with matching extensions.
         if depth > self.max_depth or current_path in self.visited:
+            logger.debug(
+                "Skipping directory: %s (max depth reached or already visited)",
+                current_path,
+            )
             return
 
         # Mark this directory as visited

@@ -32,9 +32,15 @@ class BaseAsyncProcessor(ABC):
         """
         pass
 
+    async def _cleanup(self):
+        """
+        Cleanup method to be called after processing is complete. Can be used for finalizing tasks.
+        """
+        pass
+
     async def run(
         self,
-        input_queue: asyncio.Queue,
+        input: asyncio.Queue,
         output: Union[asyncio.Queue, List[Any], io.TextIOWrapper] = None,
     ):
         """
@@ -49,11 +55,14 @@ class BaseAsyncProcessor(ABC):
         """
         while True:
             # Get item from queue
-            item = await input_queue.get()
+            item = await input.get()
+            logger.debug(f"Processing item: {item}")
 
             # Check for termination signal
             if item is None:
-                logger.info(f"{self.__class__.__name__} received termination signal")
+                logger.debug(f"{self.__class__.__name__} received termination signal")
+                # Cleanup any resources
+                self._cleanup()
                 if isinstance(output, asyncio.Queue):
                     await output.put(None)  # Forward termination
                 if isinstance(output, io.TextIOWrapper):
@@ -63,7 +72,7 @@ class BaseAsyncProcessor(ABC):
             try:
                 # Process the item (implemented by subclasses)
                 result = await self._process_item(item)
-
+                logger.debug(f"Result: {result}")
                 # If result is None, skip output handling
                 if result is not None:
                     # Handle different output types
@@ -82,4 +91,4 @@ class BaseAsyncProcessor(ABC):
                 logger.error(traceback.format_exc())
             finally:
                 # Mark as done regardless of success/failure
-                input_queue.task_done()
+                input.task_done()

@@ -141,6 +141,40 @@ async def test_filesystem_crawler_skips_discarded_files(discard_dir_structure: A
     assert "skip.txt" not in found
 
 
+@pytest.mark.asyncio
+async def test_filesystem_crawler_output_to_list(sample_dir_structure: Any):
+    crawler = AsyncFileSystemCrawler(
+        base_path=str(sample_dir_structure), max_depth=2, extensions=[".txt"]
+    )
+    output_list = []
+    await crawler.run(output=output_list)
+
+    found = set(os.path.basename(item) for item in output_list)
+    assert "file1.txt" in found
+    assert "file3.txt" in found
+    assert "file2.md" not in found
+
+
+@pytest.mark.asyncio
+async def test_filesystem_crawler_output_to_file(
+    tmp_path: Path, sample_dir_structure: Any
+):
+    crawler = AsyncFileSystemCrawler(
+        base_path=str(sample_dir_structure), max_depth=2, extensions=[".txt"]
+    )
+    output_file_path = tmp_path / "output.txt"
+    with output_file_path.open("w") as f:
+        await crawler.run(output=f)
+
+    # Read the file and check contents
+    with output_file_path.open("r") as f:
+        lines = [line.strip() for line in f.readlines()]
+    found = set(os.path.basename(line) for line in lines)
+    assert "file1.txt" in found
+    assert "file3.txt" in found
+    assert "file2.md" not in found
+
+
 # ------------------- Web Crawler Unit Test -------------------
 
 import httpx

@@ -33,14 +33,15 @@ class BaseAsyncCrawler(ABC):
     def __init__(self, base_path: str):
         self.base_path = base_path
         self.found_resources = set()
+        self.find_count = 0
 
     async def run(
         self,
         *,
         current_path: Optional[str] = None,
         depth: int = 0,
-        output: asyncio.Queue,
-    ) -> Set[str]:
+        output: Union[asyncio.Queue, list[any], io.TextIOWrapper],
+    ):
         """
         Main entry point for the file crawler.
 
@@ -55,15 +56,43 @@ class BaseAsyncCrawler(ABC):
         await self._run(current_path=current_path, depth=depth, output=output)
 
         # Signal that crawling is complete
-        await output.put(None)
+        if isinstance(output, asyncio.Queue):
+            await output.put(None)  # Forward termination
+        if isinstance(output, io.TextIOWrapper):
+            output.close()
 
-        logger.info(f"File scan completed. Found {len(self.visited) - 1} files")
-        return self.found_resources
+        logger.info(f"File scan completed. Found {self.find_count} files")
+
+    async def _update_output(
+        self, file_path: str, output: Union[asyncio.Queue, List[any], io.TextIOWrapper]
+    ):
+        """
+        Update the output with the found file path.
+        Args:
+            file_path: The path of the file to be added
+            output: The output destination (queue or list)
+        """
+        if isinstance(output, asyncio.Queue):
+            await output.put(file_path)
+        elif isinstance(output, list):
+            logger.debug(f"Added to list {output}")
+            output.append(file_path)
+        elif isinstance(output, io.TextIOWrapper):
+            output.write(f"{file_path}\n")
+        else:
+            raise ValueError("Output must be a Queue, List, or TextIOWrapper")
+
+        # Next ...
+
+        self.find_count += 1
 
     @abstractmethod
     async def _run(
-        self, current_path: Optional[str], depth: int, output: asyncio.Queue
-    ) -> Set[str]:
+        self,
+        current_path: Optional[str],
+        depth: int,
+        outpzsut: Union[asyncio.Queue, List[any], io.TextIOWrapper],
+    ):
         """
         Abstract method to be implemented by subclasses for specific crawling logic.
         Args:
@@ -171,6 +200,11 @@ class AsyncWebCrawler(BaseAsyncCrawler):
         output: asyncio.Queue,
     ) -> Set[str]:
         self.client = httpx.AsyncClient()
+
+        # Starts at the base path if not provided
+        if current_path is None:
+            current_path = self.base_path
+
         logger.info(f"Starting crawl from {current_path}")
         await self._crawl(current_path, 0, output)
 
@@ -210,7 +244,7 @@ class AsyncFileSystemCrawler(BaseAsyncCrawler):
         *,
         current_path: Optional[str] = None,
         depth: int = 0,
-        output: asyncio.Queue,
+        output: Union[asyncio.Queue, List[any], io.TextIOWrapper],
     ) -> Set[str]:
 
         # Starts at the base path if not provided
@@ -243,8 +277,7 @@ class AsyncFileSystemCrawler(BaseAsyncCrawler):
                 if entry.is_file() and self._should_include_file(entry.name):
                     file_path = os.path.abspath(entry.path)
                     logger.debug(f"Found matching file: {file_path}")
-                    self.found_resources.add(file_path)
-                    await output.put(file_path)
+                    await self._update_output(file_path, output)
 
                 elif entry.is_dir() and depth < self.max_depth:
                     subdirs.append(entry.path)
@@ -260,3 +293,4 @@ class AsyncFileSystemCrawler(BaseAsyncCrawler):
             logger.warning(f"Permission denied: {current_path}")
         except Exception as e:
             logger.error(f"Error scanning {current_path}: {str(e)}")
+            logger.debug(traceback.format_exc())

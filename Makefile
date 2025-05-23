@@ -21,9 +21,13 @@ format:
 	@echo "Formatting code..."
 	$(PYTHON) -m black ./agent ./tests
 
-test:
+unit-test:
 	@echo "Running tests..."
-	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb ./src/tests
+	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/unit
+
+integration-test:
+	@echo "Running unit tests..."
+	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/integration
 
 run:
 	@echo "Running the AI agent..."

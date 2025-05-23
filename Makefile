@@ -26,8 +26,11 @@ unit-test:
 	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/unit
 
 integration-test:
-	@echo "Running unit tests..."
+	@echo "Running integration tests..."
 	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/integration
+
+tests: unit-test integration-test
+	@echo "All tests completed."
 
 run:
 	@echo "Running the AI agent..."

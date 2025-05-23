@@ -17,11 +17,12 @@ from astrapy.info import (
 
 from graphrag_agent.utils.logging_config import get_logger
 from graphrag_agent.utils.utils import print_pretty_json
+from graphrag_agent.tools.async_processor import BaseAsyncProcessor
 
 logger = get_logger(__name__)
 
 
-class AsyncAstraDBRepository:
+class AsyncAstraDBRepository(BaseAsyncProcessor):
     """A handler class for interacting with AstraDB asynchronously. This class provides methods to initialize
     a connection to AstraDB, write documents to a collection, and retrieve documents using vector similarity search.
     Attributes:
@@ -59,7 +60,10 @@ class AsyncAstraDBRepository:
         batch_size: int = 20,
         truncate_collection: bool = False,
         use_vectorize: bool = True,
+        *args,
+        **kwargs,
     ):
+        super().__init__(*args, **kwargs)
         self.collection_name = collection_name
         self.token = token
         self.endpoint = endpoint
@@ -196,6 +200,29 @@ class AsyncAstraDBRepository:
             f"Prepared document for AstraDB: {document.get('title', 'unknown_id')} size of content: {len(document.get('content', ''))}"
         )
         return document
+
+    async def _process_item(self, document: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Insert a single document into AstraDB.
+        """
+        await self.initialize_client()
+        try:
+            doc = self._prepare_document(document)
+            if doc is not None:
+                result = await asyncio.to_thread(self.collection.insert_one, doc)
+                self.processed_count += 1
+                logger.info(f"Inserted document {doc.get('_id', 'unknown_id')}")
+                return {"status": "written", "id": doc.get("_id", "unknown_id")}
+            else:
+                return {"status": "skipped", "id": document.get("_id", "unknown_id")}
+        except Exception as e:
+            logger.error(f"Error inserting document: {e}")
+            logger.error(f"Call stack:\n{traceback.format_exc()}")
+            return {
+                "status": "error",
+                "id": document.get("_id", "unknown_id"),
+                "error": str(e),
+            }
 
     async def write(
         self,
@@ -354,3 +381,12 @@ class AsyncAstraDBRepository:
             logger.error(f"Error retrieving documents: {str(e)}")
             logger.error(f"Call stack:\n{traceback.format_exc()}")
             return []
+
+    async def _cleanup(self):
+        """Cleanup AstraDB client resources if needed."""
+        try:
+            if self.astra_client and hasattr(self.astra_client, "close"):
+                await asyncio.to_thread(self.astra_client.close)
+                logger.info("AstraDB client closed.")
+        except Exception as e:
+            logger.error(f"Error closing AstraDB client: {str(e)}")

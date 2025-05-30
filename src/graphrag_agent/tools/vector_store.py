@@ -78,7 +78,7 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
         self.truncate_collection = truncate_collection
         self.use_vectorize = use_vectorize
 
-    async def initialize_client(self):
+    async def _get_client(self):
         """Initialize the AstraDB client."""
         if self.astra_client is None:
             try:
@@ -97,7 +97,7 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
                 collections = self.astradb_database.list_collection_names()
 
                 if self.collection_name in collections:
-                    logger.info(
+                    logger.debug(
                         f"Collection {self.collection_name} already exists, connecting to it"
                     )
                     self.collection = self.astradb_database.get_collection(
@@ -109,7 +109,7 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
                     # This is too hard coded - should be passed as a parameter
 
                     if self.use_vectorize:
-                        logger.info(
+                        logger.debug(
                             f"Creating vectorize collection {self.collection_name}"
                         )
                         self.collection = self.astradb_database.create_collection(
@@ -124,7 +124,7 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
                             ),
                         )
                     else:
-                        logger.info(
+                        logger.debug(
                             f"Creating non-vectorize collection {self.collection_name}"
                         )
                         self.collection = self.astradb_database.create_collection(
@@ -141,13 +141,15 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
                     f"Successfully connected to AstraDB collection: {self.collection_name}"
                 )
 
+                return self.collection
+
             except Exception as e:
                 logger.error(f"Error initializing AstraDB client: {str(e)}")
                 raise
 
     async def sample(self) -> Dict[str, Any]:
         """Sample the collection to check if it is empty."""
-        await self.initialize_client()
+        await self._get_client()
 
         try:
             # Check if the collection is empty
@@ -163,6 +165,8 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
 
         This is a mess. Need to clean up the logic and make it more readable.
         """
+        logger.debug(f"Preparing document for AstraDB: {str(document)[:100]}...")
+
         if document is None:
             return None
 
@@ -205,8 +209,9 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
         """
         Insert a single document into AstraDB.
         """
-        await self.initialize_client()
         try:
+
+            await self._get_client(self)
             doc = self._prepare_document(document)
             if doc is not None:
                 result = await asyncio.to_thread(self.collection.insert_one, doc)
@@ -230,10 +235,8 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
         output: Union[asyncio.Queue, Dict, io.TextIOWrapper] = None,
     ) -> None:
         """Process documents from queue and write to AstraDB."""
-        await self.initialize_client()
-
         batch = []
-        total_documents = 0  # Track total documents processed
+        await self._get_client()
 
         async def _write_batch(batch_docs):
             """Helper to write a batch of documents to the database."""
@@ -241,11 +244,12 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
                 return 0
 
             try:
+
                 result = await asyncio.to_thread(
                     self.collection.insert_many, batch_docs
                 )
                 count = len(batch_docs)
-                self.processed_count += count
+                self.processed_count += len(batch_docs)
                 logger.info(
                     f"Batch written: {count} documents (total: {self.processed_count})"
                 )
@@ -259,8 +263,7 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
 
             if document is None:  # End signal
                 # Write remaining documents (without processing None)
-                docs_written = await _write_batch(batch)
-                total_documents += docs_written
+                await _write_batch(batch)
 
                 # Forward termination signal
                 if isinstance(output, asyncio.Queue):
@@ -269,7 +272,6 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
                 logger.info(
                     f"Completed writing {self.processed_count} documents to AstraDB"
                 )
-                logger.info(f"Total documents processed: {total_documents}")
                 break
 
             try:
@@ -282,8 +284,7 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
 
                     # Write batch when full
                     if len(batch) >= self.batch_size:
-                        docs_written = await _write_batch(batch)
-                        total_documents += docs_written
+                        await _write_batch(batch)
                         batch = []
 
                     # Output status if requested

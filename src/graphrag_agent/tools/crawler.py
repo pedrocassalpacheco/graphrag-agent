@@ -1,24 +1,20 @@
+from abc import ABC, abstractmethod
 import asyncio
 import io
-import json
-import os
+from typing import Dict, List, Set, Union, Any, Optional, override
 import traceback
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+import os
 
-try:
-    from typing import override  # Python 3.12+
-except ImportError:
+from graphrag_agent.utils.logging_config import get_logger
+from graphrag_agent.tools.async_processor import BaseAsyncProcessor
 
-    def override(func):  # fallback for Python <3.12
-        return func
-
+logger = get_logger(__name__)
 
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urldefrag
 
+from graphrag_agent.tools.async_processor import BaseAsyncProcessor
 from graphrag_agent.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -51,9 +47,9 @@ class BaseAsyncCrawler(ABC):
         Returns:
             Set[str]: A set of all file paths that were visited
         """
-        logger.info(f"Starting scan from {current_path}")
+        logger.info(f"Starting scan from {self.base_path} at depth {depth}")
 
-        await self._run(current_path=current_path, depth=depth, output=output)
+        await self._crawl(current_path=self.base_path, depth=depth, output=output)
 
         # Signal that crawling is complete
         if isinstance(output, asyncio.Queue):
@@ -87,11 +83,12 @@ class BaseAsyncCrawler(ABC):
         self.find_count += 1
 
     @abstractmethod
-    async def _run(
+    async def _crawl(
         self,
+        *,
         current_path: Optional[str],
         depth: int,
-        outpzsut: Union[asyncio.Queue, List[any], io.TextIOWrapper],
+        output: Union[asyncio.Queue, List[any], io.TextIOWrapper],
     ):
         """
         Abstract method to be implemented by subclasses for specific crawling logic.
@@ -124,14 +121,25 @@ class AsyncWebCrawler(BaseAsyncCrawler):
         delay: float = 0.001,
     ):
         super().__init__(base_path)
+        self.base_path = base_path
         self.max_depth = max_depth
         self.delay = delay
         self.visited = set()
         self.include_external = False
         self.lock = asyncio.Lock()
+        self.client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Initialize the HTTP client for making requests."""
+        if self.client is None:
+            logger.debug("Initializing HTTP client for web crawling")
+            # Create a new AsyncClient instance
+            self.client = httpx.AsyncClient()
+        return self.client
 
     async def _fetch(self, url: str) -> str:
         try:
+            client = await self._get_client()
             headers = {
                 "User-Agent": "Mozilla/5.0 (compatible; GraphRagCrawler/1.0; +https://github.com/yourusername/graphrag)"
             }
@@ -164,49 +172,48 @@ class AsyncWebCrawler(BaseAsyncCrawler):
                 links.append(defragmented_url)
         return links
 
-    async def _crawl(self, url: str, depth: int, queue: asyncio.Queue):
-        logger.debug(f"Crawling {url} at depth {depth}")
+    async def _crawl(self, current_path: str, depth: int, output: asyncio.Queue):
+        logger.debug(f"Crawling {current_path} at depth {depth}")
         try:
             async with self.lock:  # Ensure thread-safe access to self.visited
-                if depth > self.max_depth or url in self.visited:
-                    logger.info(
-                        f"Skipping {url} - {'max depth reached' if depth > self.max_depth else 'already visited'}"
+                if depth > self.max_depth or current_path in self.visited:
+                    logger.debug(
+                        f"Skipping {current_path} - {'max depth reached' if depth > self.max_depth else 'already visited'}"
                     )
                     return
-                self.visited.add(url)
-                await queue.put(url)  # Add the URL to the queue
+                self.visited.add(current_path)
+                await output.put(current_path)  # Add the URL to the queue
 
             # Fetch links from the page
-            links = await self._extract_links(url)
+            links = await self._extract_links(current_path)
             if links:
-                logger.debug(f"Found {len(links)} links on {url}")
+                logger.debug(f"Found {len(links)} links on {current_path}")
 
                 # Crawl the extracted links
                 tasks = [
-                    self._crawl(link, depth + 1, queue)
+                    self._crawl(link, depth + 1, output)
                     for link in links
                     if link not in self.visited
                 ]
                 await asyncio.gather(*tasks)
         except Exception as e:
-            logger.error(f"Error crawling {url}: {str(e)}")
+            logger.error(f"Error crawling {current_path}: {str(e)}")
             traceback.print_exc()
 
-    async def _run(
-        self,
-        *,
-        current_path: Optional[str] = None,
-        depth: int = 0,
-        output: asyncio.Queue,
-    ) -> Set[str]:
-        self.client = httpx.AsyncClient()
-
-        # Starts at the base path if not provided
-        if current_path is None:
-            current_path = self.base_path
-
-        logger.info(f"Starting crawl from {current_path}")
-        await self._crawl(current_path, 0, output)
+    async def _process_item(self, document: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            text = self._prepare_text(document)
+            embedding = await self._generate_embedding(text)
+            document[self.embedding_key] = embedding
+            self.processed_count += 1
+            logger.debug(
+                f"Generated embedding for document {self.processed_count}: {document.get('title', 'Untitled')}"
+            )
+            return document
+        except Exception as e:
+            logger.error(f"Error generating embedding: {str(e)}")
+            logger.error(f"Call stack:\n{traceback.format_exc()}")
+            return document
 
 
 class AsyncFileSystemCrawler(BaseAsyncCrawler):
@@ -239,7 +246,7 @@ class AsyncFileSystemCrawler(BaseAsyncCrawler):
         return any(filename.endswith(ext) for ext in self.extensions)
 
     @override
-    async def _run(
+    async def _crawl(
         self,
         *,
         current_path: Optional[str] = None,
@@ -284,7 +291,7 @@ class AsyncFileSystemCrawler(BaseAsyncCrawler):
 
             # Process subdirectories concurrently
             tasks = [
-                self._run(current_path=subdir, depth=depth + 1, output=output)
+                self._crawl(current_path=subdir, depth=depth + 1, output=output)
                 for subdir in subdirs
             ]
             await asyncio.gather(*tasks)

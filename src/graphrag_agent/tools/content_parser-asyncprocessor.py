@@ -16,8 +16,47 @@ from graphrag_agent.tools.async_processor import BaseAsyncProcessor
 
 logger = get_logger(__name__)
 
+HTML_TAGS_TO_PARSE = [
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "ul",
+    "ol",
+    "table",
+    "blockquote",
+    "pre",
+    "code",
+    "img",
+]
 
-class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
+
+class ContentFormatMixin:
+    """Mixin to provide content formatting utilities.
+    This done to ensure different sources are formatted in a consistent way.
+    source: Source of the content
+    title: Title of the content
+    content: the actual document or document chunk
+    """
+
+    def format_content(self, source: str, content: Dict[str, List[str]]) -> str:
+        for title, section_content in content.items():
+            if not section_content:
+                continue
+
+            logger.debug(f"Parsed section: {title} from {source}")
+
+            return {
+                "source": source,  # Using item as the identifier
+                "title": title,
+                "content": section_content,
+            }
+
+
+class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor, ContentFormatMixin):
     """A parser for processing Markdown content specific for langflow
     asynchronously, specifically designed to handle Langflow documentation. This parser preserves tables and header
     hierarchy while extracting content into structured sections.
@@ -31,7 +70,9 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
             Markdown rows. Handles table headers, alignment, and data rows.
     """
 
-    async def _parse_markdown_component_doc(self, content: str) -> Any:
+    async def _parse_markdown_component_doc(
+        self, content: str
+    ) -> AsyncGenerator[Any, None]:
         """Parse Markdown content, preserving tables and header hierarchy."""
         if not content or not isinstance(content, str):
             logger.error("Invalid content provided for parsing.")
@@ -53,6 +94,9 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
                 # Save previous section if it exists
                 if current_h2 and current_section:
                     sections[current_h2] = current_section
+                    yield {
+                        current_h2: current_section,
+                    }
                     current_section = []
 
                 # Get the H2 heading content
@@ -94,10 +138,12 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
 
         # Yield the last section
         if current_h2 and current_section:
-            sections[current_h2] = current_section
+            yield {
+                current_h2: current_section,
+            }
+
         self.processed_count = len(sections)
         logger.info(f"Parsed {len(sections)} Markdown sections")
-        return sections
 
     def _process_table(self, tokens, i):
         """
@@ -200,7 +246,7 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
         )  # Return the list of formatted table rows and the new index
 
     @override
-    async def _process_item(self, item: Any) -> Any:
+    async def _process_item(self, item: Any) -> AsyncGenerator[Any, None]:
         """Process item and yield individual sections."""
         if not isinstance(item, str):
             raise TypeError(f"Expected string path, got {type(item).__name__}")
@@ -213,7 +259,8 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
             )
 
             # Use async for to iterate over the generator and yield each section
-            return await self._parse_markdown_component_doc(content)
+            async for section in self._parse_markdown_component_doc(content):
+                yield section
 
         except (FileNotFoundError, PermissionError, UnicodeDecodeError) as e:
             logger.error(f"{type(e).__name__} when reading file {file_path}: {e}")
@@ -222,10 +269,10 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
             logger.error(f"Error reading file {file_path}: {str(e)}")
 
 
-class AsyncPythonComponentParser(BaseAsyncProcessor):
+class AsyncPythonComponentParser(BaseAsyncProcessor, ContentFormatMixin):
     """ """
 
-    async def _parse_python_component(self, path: Path) -> Any:
+    async def _parse_python_component(self, path: Path) -> AsyncGenerator[Any, None]:
         """Parse Python source code into a structured format using a file object."""
         structured_content = {}
         try:
@@ -253,13 +300,13 @@ class AsyncPythonComponentParser(BaseAsyncProcessor):
 
                     # Store in structured content
                     structured_content[class_key] = class_data[class_key]
+                    yield {class_key: class_data[class_key]}
 
             self.processed_count += len(structured_content)
             logger.debug(
                 f"Parsed {len(structured_content)} Python code sections from {path.name}"
             )
             logger.debug(f"Content \n{structured_content} ")
-            return structured_content
 
         except Exception as e:
             logger.error(f"Error parsing Python code from {path}: e")
@@ -360,47 +407,29 @@ class AsyncPythonComponentParser(BaseAsyncProcessor):
         # Check if the node has a name attribute and if it starts with an underscore
         return hasattr(node, "name") and not node.name.startswith("_")
 
-    async def _process_item(self, file_path: str) -> Any:
-        try:
-            path = self._validate_file_path(file_path)
+    @override
+    async def _process_item(self, item: Any) -> AsyncGenerator[Any, None]:
 
+        if not isinstance(item, str):
+            raise TypeError(f"Expected string URL, got {type(item).__name__}")
+        else:
+            file_path = str(item)
+
+        try:
+            path = Path(file_path)
             # Use async for to iterate over the generator and yield each section
-            component_code = await self._parse_python_component(path)
-            return component_code
+            async for section in self._parse_python_component(path):
+                yield section
 
         except (FileNotFoundError, PermissionError, UnicodeDecodeError) as e:
             logger.error(f"{type(e).__name__} when reading file {file_path}: {e}")
-
-
-class AsyncNoParser(BaseAsyncProcessor):
-    """Simply return the file without any processing"""
-
-    async def _process_item(self, item: Any) -> Any:
-        if not isinstance(item, str):
-            raise TypeError(f"Expected string path, got {type(item).__name__}")
-
-        file_path = str(item)
-
-        try:
-            # Simple file read - preserves everything exactly as written
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-
-            # Return the entire file content
-            return {
-                "file_path": file_path,
-                "content": content,
-            }
 
         except Exception as e:
-            logger.error(f"Error reading {file_path}: {e}")
-            return []
-
-        except (FileNotFoundError, PermissionError, UnicodeDecodeError) as e:
-            logger.error(f"{type(e).__name__} when reading file {file_path}: {e}")
+            logger.error(f"Error reading file {file_path}: {str(e)}")
 
 
-class AsyncPythonExampleParser(BaseAsyncProcessor):
+# Fix AsyncPythonSampleParser - it returns instead of yields
+class AsyncPythonSampleParser(BaseAsyncProcessor, ContentFormatMixin):
     """
     Asynchronous parser for Python code samples.
 
@@ -409,7 +438,7 @@ class AsyncPythonExampleParser(BaseAsyncProcessor):
     """
 
     @override
-    async def _process_item(self, item: Any) -> Any:
+    async def _process_item(self, item: Any) -> AsyncGenerator[Any, None]:
         if not isinstance(item, str):
             raise TypeError(f"Expected string path, got {type(item).__name__}")
 

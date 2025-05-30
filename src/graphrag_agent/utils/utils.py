@@ -1,6 +1,13 @@
 import json
 import tiktoken
 from typing import Union, List, Dict, Optional
+import asyncio
+import os
+from datetime import datetime
+
+LOG_DIR = os.getenv("LOGS_DIR", "./logs")
+# Ensure directories exist
+os.makedirs(LOG_DIR, exist_ok=True)
 
 
 def print_pretty_json(json_data: Union[dict, str]) -> None:
@@ -54,3 +61,25 @@ def count_tokens(
         return len(encoding.encode(prompt))
 
     return 0
+
+
+def dump_queue(queue: asyncio.Queue) -> List:
+    """
+    Dump the contents of an asyncio queue to a list and write them to a date-stamped log file.
+
+    Args:
+        queue: The asyncio queue to dump.
+
+    Returns:
+        List: A list containing the items in the queue.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{LOG_DIR}/conversation_dump_{timestamp}.txt"
+
+    # Write conversation to file
+    with open(filename, "w") as f:
+        f.write("QEUE DUMP\n")
+        f.write("=" * 80 + "\n")
+        while not queue.empty():
+            item = queue.get_nowait()
+            f.write(f"{item}\n")

@@ -344,6 +344,46 @@ class FlowGenerator:
 
             raise
 
+    def _dump_conversation_to_file(self):
+        """
+        Dump the current conversation messages to a file for debugging/analysis.
+
+        Returns:
+            str: Path to the saved file
+        """
+        try:
+            # Create filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{LOG_DIR}/conversation_dump_{timestamp}.txt"
+
+            # Write conversation to file
+            with open(filename, "w") as f:
+                f.write("CONVERSATION DUMP\n")
+                f.write("=" * 80 + "\n")
+                f.write(f"Generated at: {datetime.now().isoformat()}\n")
+                f.write(f"Total messages: {len(self.messages)}\n")
+                f.write("=" * 80 + "\n\n")
+
+                for i, message in enumerate(self.messages):
+                    role = message.get("role", "unknown")
+                    content = message.get("content", "")
+
+                    f.write(f"MESSAGE #{i+1}\n")
+                    f.write(f"Role: {role}\n")
+                    f.write(f"Tokens: {count_tokens([message])}\n")
+                    f.write("-" * 40 + "\n")
+                    f.write(f"{content}\n")
+                    f.write("\n" + "=" * 80 + "\n\n")
+
+            logger.info(f"Conversation dumped to: {filename}")
+            print(f"Conversation saved to: {filename}")
+            return filename
+
+        except Exception as e:
+            logger.error(f"Error dumping conversation to file: {e}")
+            print(f"Error saving conversation: {e}")
+            return None
+
     def _save_flow_to_file(self, code: str):
         """
         Save generated code to a file.
@@ -658,6 +698,9 @@ class FlowGenerator:
                     elif feedback.startswith("plot"):
                         logger.debug("Tool detection: broswer automation")
                         await self._launch_browser_automation(flow_code)
+                    elif feedback.startswith("dump"):
+                        logger.debug("Tool detection: dump conversation")
+                        self._dump_conversation_to_file()
                     else:
                         # Use feedback directly as the next query
                         query = feedback

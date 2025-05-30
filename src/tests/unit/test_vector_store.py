@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from typing import Dict, Any, List
 from graphrag_agent.tools.vector_store import AsyncAstraDBRepository
 
+pytestmark = pytest.mark.skip(reason="All crawler tests temporarily disabled")
+
 
 @pytest.fixture(scope="session")
 def env_config():

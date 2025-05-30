@@ -21,6 +21,11 @@ format:
 	@echo "Formatting code..."
 	$(PYTHON) -m black ./agent ./tests
 
+test-file:
+	@echo "Running single testtests..."
+	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/unit/$(FILE
+	)
+
 unit-test:
 	@echo "Running tests..."
 	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/unit

@@ -1,9 +1,12 @@
 import asyncio
 import io
 import json
+import logging
 import traceback
+import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, AsyncGenerator
+from pathlib import Path
 
 from graphrag_agent.utils.logging_config import get_logger
 
@@ -53,16 +56,22 @@ class BaseAsyncProcessor(ABC):
                 - List: to collect results in a list
                 - io.TextIOWrapper: to write results to a file (JSON serialized)
         """
+        concrete_class = self.__class__.__name__
+        logger.debug(f"Starting {concrete_class} processor...")
         while True:
-            # Get item from queue
+            # Get item from queue. No assumptions are made on what the item is.
+            # It is up to the implementation to figure it out.
             item = await input.get()
-            logger.debug(f"Processing item: {item}")
+
+            logger.debug(f"Processing {str(item)[:50]} ...")
 
             # Check for termination signal
             if item is None:
-                logger.debug(f"{self.__class__.__name__} received termination signal")
+                logger.debug(
+                    f"{concrete_class} received termination signal.Processed {self.processed_count} items."
+                )
                 # Cleanup any resources
-                self._cleanup()
+                await self._cleanup()
                 if isinstance(output, asyncio.Queue):
                     await output.put(None)  # Forward termination
                 if isinstance(output, io.TextIOWrapper):
@@ -71,24 +80,51 @@ class BaseAsyncProcessor(ABC):
 
             try:
                 # Process the item (implemented by subclasses)
+                logger.debug
                 result = await self._process_item(item)
-                logger.debug(f"Result: {result}")
-                # If result is None, skip output handling
-                if result is not None:
-                    # Handle different output types
-                    if isinstance(output, asyncio.Queue):
-                        await output.put(result)
-                    elif isinstance(output, io.TextIOWrapper):
-                        output.write(str(item) + "\n")
-                    elif isinstance(output, list):
-                        output.append(result)
+
+                # Convert results to a list for uniform processing
+                if result is None:
+                    items_to_process = []
+                elif isinstance(result, (list, set, tuple)):
+                    items_to_process = list(result)
+                else:
+                    items_to_process = [result]
+
+                # Process each item uniformly
+                for result in items_to_process:
+                    if result is not None:
+                        # Handle different output types
+                        if isinstance(output, asyncio.Queue):
+                            await output.put(result)
+                        elif isinstance(output, io.TextIOWrapper):
+                            output.write(str(result) + "\n")
+                        elif isinstance(output, list):
+                            output.append(result)
 
                     self.processed_count += 1
-                    logger.debug(f"Processed item {self.processed_count}")
 
             except Exception as e:
-                logger.error(f"Error processing item: {e}")
+                logger.error(f"Error processing fron {concrete_class} item: {e}")
                 logger.error(traceback.format_exc())
             finally:
                 # Mark as done regardless of success/failure
                 input.task_done()
+
+    def _validate_file_path(self, file_path: str) -> Path:
+        """Validate file path and return Path object."""
+        if not file_path or not isinstance(file_path, str):
+            raise ValueError("File path must be a non-empty string")
+
+        path = Path(file_path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"File does not exist: {file_path}")
+
+        if not path.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
+
+        if not os.access(path, os.R_OK):
+            raise PermissionError(f"File is not readable: {file_path}")
+
+        return path

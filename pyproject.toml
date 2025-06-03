@@ -35,4 +35,14 @@ dependencies = [
     "pytest-asyncio>=0.26.0",
     "bs4>=0.0.2",
     "pytest-httpserver>=1.1.3",
+    "langchain-core>=0.3.63",
+    "pytest-html>=4.1.1",
+    "pytest-sugar>=1.0.0",
 ]
+
+
+[tool.pytest.ini_options]
+log_cli = false
+log_cli_level = "WARNING"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
+addopts = "--tb=short -v --strict-markers"

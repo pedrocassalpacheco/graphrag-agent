@@ -1,4 +1,5 @@
 import os
+import ast
 import pytest
 from pathlib import Path
 from dotenv import load_dotenv
@@ -6,7 +7,7 @@ from dotenv import load_dotenv
 from graphrag_agent.tools.content_parser import (
     AsyncLangflowDocsMarkdownParser,
     AsyncPythonComponentParser,
-    AsyncPythonSampleParser,
+    AsyncNoParser,
 )
 from graphrag_agent.utils.logging_config import get_logger
 
@@ -53,12 +54,12 @@ This component creates a `SyntheticMemoryHistory` instance, enabling storage and
     )
     parser = AsyncLangflowDocsMarkdownParser()
     results = []
-    async for result in parser._process_item(str(test_md)):
-        results.append(result)
+    results = await parser._process_item(str(test_md))
 
+    logger.debug(results)
     assert len(results) > 0
-    assert isinstance(results[0], dict)
-    assert "SyntheticMemoryComponent" in results[0]
+    assert isinstance(results, dict)
+    assert "SyntheticMemoryComponent" in results.keys()
 
 
 @pytest.mark.asyncio
@@ -86,21 +87,25 @@ class TestComponent:
 
     parser = AsyncPythonComponentParser()
     results = []
-    async for result in parser._process_item(str(py_file)):
-        results.append(result)
+    results = await parser._process_item(str(py_file))
 
     assert len(results) > 0
-    assert isinstance(results[0], dict)
+    assert isinstance(results, dict)
+
     # Check if we got the class information
-    found_component = False
-    for result in results:
-        for key, value in result.items():
-            if "TestComponent" in key:
-                found_component = True
-                assert "class_name" in value
-                assert value["class_name"] == "TestComponent"
-                break
-    assert found_component
+    assert any("TestComponent" in key for key in results.keys())
+
+    # Get the component data (adjust key based on your actual parser output structure)
+    component_key = "component.py::TestComponent"  # Fixed typo from "TestCompoment"
+    component_data = results[component_key]
+
+    # Assert each field
+    assert component_data["class_name"] == "TestComponent"
+    assert component_data["docstring"] == "A test component for parsing."
+    assert component_data["inputs"] == "{'param1': str, 'param2': int}"
+    assert component_data["outputs"] == "{'result': str}"
+    assert component_data["display_name"] == "Test Component"
+    assert component_data["name"] == "test_component"
 
 
 @pytest.mark.asyncio
@@ -126,19 +131,15 @@ async def async_function(name: str) -> str:
 '''
     )
 
-    parser = AsyncPythonSampleParser()
+    parser = AsyncNoParser()
     results = []
-    async for result in parser._process_item(str(py_file)):
-        results.append(result)
+    results = await parser._process_item(str(py_file))
+    import pdb
 
-    assert len(results) >= 2  # Should have public_function and async_function
+    pdb.set_trace()
+    try:
+        ast.parse(results["content"])
+        assert True
 
-    # Check that we got the expected functions
-    function_names = []
-    for result in results:
-        for key, value in result.items():
-            function_names.append(value["name"])
-
-    assert "public_function" in function_names
-    assert "async_function" in function_names
-    assert "_private_function" not in function_names  # Should be excluded
+    except SyntaxError:
+        assert False

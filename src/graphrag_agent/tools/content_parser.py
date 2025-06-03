@@ -1,18 +1,12 @@
 import ast
-import asyncio
-import httpx
-import io
-import json
-import os
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, override, AsyncGenerator
+from typing import Any, Dict, Union, override
 
-from bs4 import BeautifulSoup
 from markdown_it import MarkdownIt
 
 from graphrag_agent.utils.logging_config import get_logger
 from graphrag_agent.tools.async_processor import BaseAsyncProcessor
+from graphrag_agent.tools.parse_content import ParsedContent
 
 logger = get_logger(__name__)
 
@@ -31,16 +25,20 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
             Markdown rows. Handles table headers, alignment, and data rows.
     """
 
-    async def _parse_markdown_component_doc(self, content: str) -> Any:
+    async def _parse_markdown_component_doc(
+        self, file_path: str
+    ) -> list[ParsedContent]:
         """Parse Markdown content, preserving tables and header hierarchy."""
-        if not content or not isinstance(content, str):
+        if not file_path or not isinstance(file_path, str):
             logger.error("Invalid content provided for parsing.")
-            return
+            return []
+
+        content = await self._read_file_content(file_path)
 
         md = MarkdownIt("gfm-like")
         tokens = md.parse(content)
 
-        sections = {}
+        parsed_content = []
         current_h2 = None
         current_section = []
 
@@ -52,7 +50,19 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
             if token.type == "heading_open" and token.tag == "h2":
                 # Save previous section if it exists
                 if current_h2 and current_section:
-                    sections[current_h2] = current_section
+                    parsed_content.append(
+                        ParsedContent(
+                            source=file_path,
+                            section=current_h2,
+                            content="\n".join(current_section),
+                            metadata={
+                                "parser": "langflow_docs_markdown",
+                                "level": "h2",
+                            },
+                            content_type="heading",
+                        )
+                    )
+
                     current_section = []
 
                 # Get the H2 heading content
@@ -65,7 +75,7 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
             # Handle tables specially to preserve structure
             elif current_h2 and token.type == "table_open":
                 table_md, new_i = self._process_table(tokens, i)
-                current_section.append(table_md)
+                current_section.extend(table_md)
                 i = new_i
 
             # For all other content in an H2 section
@@ -94,10 +104,18 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
 
         # Yield the last section
         if current_h2 and current_section:
-            sections[current_h2] = current_section
-        self.processed_count = len(sections)
-        logger.info(f"Parsed {len(sections)} Markdown sections")
-        return sections
+            parsed_content.append(
+                ParsedContent(
+                    source=file_path,
+                    section=current_h2,
+                    content="\n".join(current_section),
+                    metadata={"parser": "langflow_docs_markdown", "level": "h2"},
+                    content_type="heading",
+                )
+            )
+
+        logger.info(f"Parsed {len(parsed_content)} Markdown sections")
+        return parsed_content
 
     def _process_table(self, tokens, i):
         """
@@ -200,7 +218,7 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
         )  # Return the list of formatted table rows and the new index
 
     @override
-    async def _process_item(self, item: Any) -> Any:
+    async def _process_item(self, item: Any) -> list[ParsedContent]:
         """Process item and yield individual sections."""
         if not isinstance(item, str):
             raise TypeError(f"Expected string path, got {type(item).__name__}")
@@ -208,196 +226,286 @@ class AsyncLangflowDocsMarkdownParser(BaseAsyncProcessor):
             file_path = str(item)
 
         try:
-            content = await asyncio.to_thread(
-                Path(file_path).read_text, encoding="utf-8"
-            )
-
             # Use async for to iterate over the generator and yield each section
-            return await self._parse_markdown_component_doc(content)
+            return await self._parse_markdown_component_doc(file_path)
 
         except (FileNotFoundError, PermissionError, UnicodeDecodeError) as e:
-            logger.error(f"{type(e).__name__} when reading file {file_path}: {e}")
+            # Handle file-related errors specifically
+            logger.error(f"File error parsing {file_path}: {e}")
+            return []  # Return empty list for file errors
 
         except Exception as e:
-            logger.error(f"Error reading file {file_path}: {str(e)}")
+            # Handle parsing errors differently - maybe you want to fail fast here
+            logger.error(f"Parse error in {file_path}: {e}")
+            raise  # Re-raise parsing errors
 
 
 class AsyncPythonComponentParser(BaseAsyncProcessor):
-    """ """
+    """Parser for Python component files that extracts class definitions."""
 
-    async def _parse_python_component(self, path: Path) -> Any:
-        """Parse Python source code into a structured format using a file object."""
-        structured_content = {}
-        try:
-            # Read the file content once
-            with path.open("r", encoding="utf-8") as file:
-                content = file.read()
+    async def _parse_python_component(self, file_path: str) -> list[ParsedContent]:
+        """Parse Python source code from file path into ParsedContent objects."""
+        content = await self._read_file_content(file_path)
+        tree = ast.parse(content)
+        parsed_sections = []
 
-            # Parse the file content into an AST
-            tree = ast.parse(content)
+        # Extract all imports once
+        imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                imports.append(ast.unparse(node))
 
-            # Extract module docstring if available
-            module_docstring = ast.get_docstring(tree)
-            if module_docstring:
-                structured_content[f"{path.name}::module"] = [module_docstring]
+        # Process each class
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                class_info = self._extract_class_info(node, imports)
 
-            # First pass: process class definitions
-            class_data = {}
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    class_info = self._extract_class_definition(node)
-                    class_key = f"{path.name}::{class_info['class_name']}"
+                parsed_sections.append(
+                    ParsedContent(
+                        source=file_path,
+                        section=f"class::{class_info['class_name']}",
+                        content=class_info["formatted_content"],
+                        metadata={
+                            "parser": "python_component",
+                            **class_info["metadata"],
+                        },
+                        content_type="class",
+                    )
+                )
 
-                    # Initialize with class data and empty public_methods list
-                    class_data[class_key] = class_info
+        logger.info(f"Parsed {len(parsed_sections)} Python sections from {file_path}")
+        return parsed_sections
 
-                    # Store in structured content
-                    structured_content[class_key] = class_data[class_key]
+    def _extract_class_info(self, node: ast.ClassDef, imports: list) -> dict:
+        """Extract all class information in a clean, organized way."""
+        class_name = node.name
+        docstring = ast.get_docstring(node) or ""
+        base_classes = [ast.unparse(base) for base in node.bases]
 
-            self.processed_count += len(structured_content)
-            logger.debug(
-                f"Parsed {len(structured_content)} Python code sections from {path.name}"
-            )
-            logger.debug(f"Content \n{structured_content} ")
-            return structured_content
-
-        except Exception as e:
-            logger.error(f"Error parsing Python code from {path}: e")
-            import traceback
-
-            logger.debug(f"Call stack:\n{traceback.format_exc()}")
-
-    def _extract_function_signature(
-        self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef]
-    ) -> Dict[str, Any]:
-        """
-        Extract the function signature and related information from a function node.
-
-        Args:
-            node (Union[ast.FunctionDef, ast.AsyncFunctionDef]): The AST node representing a function.
-
-        Returns:
-            Dict[str, Any]: Dictionary containing function signature and metadata.
-        """
-        # Get the function name and arguments
-        func_name = node.name
-        args = ast.unparse(node.args)
-
-        # Get the return type if available
-        return_type = ""
-        if node.returns:
-            return_type = f" -> {ast.unparse(node.returns)}"
-
-        # Construct the signature
-        signature = f"{func_name}{args}{return_type}"
-
-        # Extract docstring if available
-        docstring = ast.get_docstring(node)
-
-        # Extract decorators if available
-        decorators = []
-        for decorator in node.decorator_list:
-            decorators.append(ast.unparse(decorator))
-
-        # Return a dictionary with the signature as key and additional information
-        return {
-            "method_signature": signature,
-            "name": func_name,
-            "docstring": docstring,
-            "decorators": decorators,
-            "is_async": isinstance(node, ast.AsyncFunctionDef),
+        # Define what attributes we're looking for
+        attributes = {
+            "inputs": "",
+            "outputs": "",
+            "display_name": "",
+            "name": "",
+            "description": "",
+            "icon": "",
         }
 
-    def _extract_class_definition(self, node: ast.ClassDef) -> Dict[str, Any]:
-        """
-        Handle class definitions and extract relevant information.
-        Args:
-            node (ast.ClassDef): The AST node representing a class definition.
-        Returns:
-            List[str]: A list of strings representing the class definition.
-        """
-        class_name = node.name
-        class_vars = {"inputs": {}, "outputs": {}, "display_name": None, "name": None}
+        public_methods = []
 
-        # Extract base classes
-        base_classes = []
-        for base in node.bases:
-            base_class_name = ast.unparse(base)
-            base_classes.append(base_class_name)
-
-        # Extract class-level variables
+        # Process all statements in the class body
         for stmt in node.body:
-            if isinstance(stmt, ast.Assign):
-                for target in stmt.targets:
-                    if isinstance(target, ast.Name):
-                        if target.id in {"inputs", "outputs"}:
-                            class_vars[target.id] = ast.unparse(stmt.value)
-                        elif target.id == "display_name":
-                            class_vars["display_name"] = ast.literal_eval(stmt.value)
-                        elif target.id == "name":
-                            class_vars["name"] = ast.literal_eval(stmt.value)
+            # Handle function definitions
+            if isinstance(stmt, ast.FunctionDef) and not stmt.name.startswith("_"):
+                args = [arg.arg for arg in stmt.args.args]
+                signature = f"def {stmt.name}({', '.join(args)})"
+                public_methods.append(signature)
+                continue
 
-        # Add to structured content
+            # Extract target and value from assignments
+            target_value_pairs = self._get_assignment_pairs(stmt)
+
+            for target_name, value in target_value_pairs:
+                if target_name in attributes:
+                    if target_name in ["inputs", "outputs"]:
+                        attributes[target_name] = ast.unparse(value)
+                    else:
+                        # For other attributes, try to get the literal value
+                        try:
+                            attributes[target_name] = ast.literal_eval(value)
+                        except (ValueError, SyntaxError):
+                            attributes[target_name] = ast.unparse(value)
+
+        # Format the content
+        formatted_content = self._format_class_as_code(
+            class_name=class_name,
+            docstring=docstring,
+            base_classes=base_classes,
+            public_methods=public_methods,
+            imports=imports,
+            **attributes,
+        )
+
         return {
             "class_name": class_name,
-            "docstring": ast.get_docstring(node),
-            "inputs": class_vars["inputs"],
-            "outputs": class_vars["outputs"],
-            "display_name": class_vars["display_name"],
-            "name": class_vars["name"],
+            "formatted_content": formatted_content,
+            "metadata": {
+                "class_name": class_name,
+                "base_classes": base_classes,
+                "public_methods": public_methods,
+                "imports": imports,
+                **attributes,
+            },
         }
 
-    def _should_include_node(self, node: ast.AST) -> bool:
-        """
-        Determine if an AST node should be included based on its name.
+    def _get_assignment_pairs(self, stmt: ast.stmt) -> list[tuple[str, ast.expr]]:
+        """Extract (target_name, value) pairs from assignment statements."""
+        pairs = []
 
-        Args:
-            node (ast.AST): The AST node to check.
+        if isinstance(stmt, ast.Assign):
+            # Regular assignment: name = "value"
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    pairs.append((target.id, stmt.value))
 
-        Returns:
-            bool: True if the node should be included, False otherwise.
-        """
-        # Check if the node has a name attribute and if it starts with an underscore
-        return hasattr(node, "name") and not node.name.startswith("_")
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            # Annotated assignment: name: str = "value"
+            if stmt.value is not None:  # Skip annotation-only assignments
+                pairs.append((stmt.target.id, stmt.value))
 
-    async def _process_item(self, file_path: str) -> Any:
-        try:
-            path = self._validate_file_path(file_path)
+        return pairs
 
-            # Use async for to iterate over the generator and yield each section
-            component_code = await self._parse_python_component(path)
-            return component_code
+    def _format_class_as_code(
+        self,
+        class_name: str,
+        docstring: str,
+        base_classes: list,
+        inputs: str,
+        outputs: str,
+        display_name: str,
+        name: str,
+        description: str,
+        icon: str,
+        public_methods: list,
+        imports: list,
+    ) -> str:
+        """Format class information to look like actual Python code."""
 
-        except (FileNotFoundError, PermissionError, UnicodeDecodeError) as e:
-            logger.error(f"{type(e).__name__} when reading file {file_path}: {e}")
+        lines = []
 
+        # Add imports at the top
+        if imports:
+            lines.extend(imports)
+            lines.append("")  # Empty line after imports
 
-class AsyncNoParser(BaseAsyncProcessor):
-    """Simply return the file without any processing"""
+        # Add class definition with base classes
+        if base_classes:
+            base_classes_str = f"({', '.join(base_classes)})"
+        else:
+            base_classes_str = ""
 
-    async def _process_item(self, item: Any) -> Any:
+        lines.append(f"class {class_name}{base_classes_str}:")
+
+        # Add class docstring
+        if docstring:
+            lines.append('    """')
+            docstring_lines = docstring.split("\n")
+            for doc_line in docstring_lines:
+                lines.append(f"    {doc_line}")
+            lines.append('    """')
+            lines.append("")
+
+        # Add class attributes
+        if display_name:
+            lines.append(f'    display_name: str = "{display_name}"')
+        if description:
+            lines.append(f'    description: str = "{description}"')
+        if icon:
+            lines.append(f'    icon = "{icon}"')
+        if name:
+            lines.append(f'    name = "{name}"')
+
+        lines.append("")
+
+        # Format inputs with proper line breaks
+        if inputs and inputs != "{}":
+            lines.append("    inputs = [")
+            # Split by comma and format each input on its own line
+            input_items = inputs.strip("[]").split(", ")
+            for i, item in enumerate(input_items):
+                if item.strip():
+                    comma = "," if i < len(input_items) - 1 else ""
+                    lines.append(f"        {item.strip()}{comma}")
+            lines.append("    ]")
+            lines.append("")
+
+        # Format outputs with proper line breaks
+        if outputs and outputs != "{}":
+            lines.append("    outputs = [")
+            # Split by comma and format each output on its own line
+            output_items = outputs.strip("[]").split(", ")
+            for i, item in enumerate(output_items):
+                if item.strip():
+                    comma = "," if i < len(output_items) - 1 else ""
+                    lines.append(f"        {item.strip()}{comma}")
+            lines.append("    ]")
+            lines.append("")
+
+        # Add public method signatures
+        if public_methods:
+            for method in public_methods:
+                lines.append(f"    {method}:")
+                lines.append('        """Method implementation..."""')
+                lines.append("        pass")
+                lines.append("")
+
+        return "\n".join(lines)
+
+    @override
+    async def _process_item(self, item: Any) -> list[ParsedContent]:
+        """Process item with comprehensive error handling."""
         if not isinstance(item, str):
             raise TypeError(f"Expected string path, got {type(item).__name__}")
 
         file_path = str(item)
 
         try:
-            # Simple file read - preserves everything exactly as written
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            return await self._parse_python_component(file_path)
 
-            # Return the entire file content
-            return {
-                "file_path": file_path,
-                "content": content,
-            }
-
+        except FileNotFoundError:
+            logger.warning(f"File not found, skipping: {file_path}")
+            return []
+        except PermissionError:
+            logger.warning(f"Permission denied, skipping: {file_path}")
+            return []
+        except UnicodeDecodeError:
+            logger.warning(f"Encoding error, skipping: {file_path}")
+            return []
+        except SyntaxError as e:
+            logger.warning(f"Python syntax error in {file_path}, skipping: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error reading {file_path}: {e}")
+            logger.error(f"Unexpected error processing {file_path}: {e}")
             return []
 
-        except (FileNotFoundError, PermissionError, UnicodeDecodeError) as e:
-            logger.error(f"{type(e).__name__} when reading file {file_path}: {e}")
+
+class AsyncNoParser(BaseAsyncProcessor):
+    """Simply return the file content without any processing."""
+
+    @override
+    async def _process_item(self, item: Any) -> list[ParsedContent]:
+        """Process item with comprehensive error handling."""
+        if not isinstance(item, str):
+            raise TypeError(f"Expected string path, got {type(item).__name__}")
+
+        file_path = str(item)
+
+        try:
+            content = await self._read_file_content(file_path)
+
+            return [
+                ParsedContent(
+                    source=file_path,
+                    section="file",
+                    content=content,
+                    metadata={"parser": "no_parser"},
+                    content_type="file",
+                )
+            ]
+
+        except FileNotFoundError:
+            logger.warning(f"File not found, skipping: {file_path}")
+            return []
+        except PermissionError:
+            logger.warning(f"Permission denied, skipping: {file_path}")
+            return []
+        except UnicodeDecodeError:
+            logger.warning(f"Encoding error, skipping: {file_path}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error processing {file_path}: {e}")
+            return []
 
 
 class AsyncPythonExampleParser(BaseAsyncProcessor):

@@ -22,6 +22,43 @@ class BaseAsyncProcessor(ABC):
     def __init__(self):
         self.processed_count = 0
 
+    def _validate_file_path(self, file_path: str) -> Path:
+        """Validate file path and return Path object."""
+        if not file_path or not isinstance(file_path, str):
+            raise ValueError("File path must be a non-empty string")
+
+        path = Path(file_path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"File does not exist: {file_path}")
+
+        if not path.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
+
+        if not os.access(path, os.R_OK):
+            raise PermissionError(f"File is not readable: {file_path}")
+
+        return path
+
+    async def _read_file_content(self, file_path: str) -> str:
+        """
+        Common method to read file content asynchronously.
+
+        Args:
+            file_path: Path to the file to read
+
+        Returns:
+            File content as string
+
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            PermissionError: If insufficient permissions
+            UnicodeDecodeError: If file encoding issues
+        """
+        content = await asyncio.to_thread(Path(file_path).read_text, encoding="utf-8")
+        logger.debug(f"Successfully read file: {file_path} ({len(content)} chars)")
+        return content
+
     @abstractmethod
     async def _process_item(self, item: Any) -> Any:
         """
@@ -110,21 +147,3 @@ class BaseAsyncProcessor(ABC):
             finally:
                 # Mark as done regardless of success/failure
                 input.task_done()
-
-    def _validate_file_path(self, file_path: str) -> Path:
-        """Validate file path and return Path object."""
-        if not file_path or not isinstance(file_path, str):
-            raise ValueError("File path must be a non-empty string")
-
-        path = Path(file_path)
-
-        if not path.exists():
-            raise FileNotFoundError(f"File does not exist: {file_path}")
-
-        if not path.is_file():
-            raise ValueError(f"Path is not a file: {file_path}")
-
-        if not os.access(path, os.R_OK):
-            raise PermissionError(f"File is not readable: {file_path}")
-
-        return path

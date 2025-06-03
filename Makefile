@@ -22,18 +22,28 @@ format:
 	$(PYTHON) -m black ./agent ./tests
 
 test-file:
-	@echo "Running single testtests..."
-	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/unit/$(FILE
-	)
+	@echo "Running single test..."
+	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb  ./src/tests/unit/$(FILE)
 
 unit-test:
 	@echo "Running tests..."
-	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/unit
+	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb ./src/tests/unit
 
 integration-test:
 	@echo "Running integration tests..."
-	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb --log-cli-level=DEBUG ./src/tests/integration
+	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest -v --pdb  ./src/tests/integration
 
+test-report:
+	@echo "Running all tests and generating HTML report..."
+	PYTHONPATH=$(SRC_DIR) $(PYTHON) -m pytest \
+		./src/tests/unit ./src/tests/integration \
+		--cov=src/graphrag_agent \
+		--cov-report=html:test_reports/coverage \
+		--html=test_reports/test_results.html \
+		--self-contained-html \
+		--junitxml=test_reports/junit.xml
+	 open test_reports/test_results.html
+	 
 tests: unit-test integration-test
 	@echo "All tests completed."
 

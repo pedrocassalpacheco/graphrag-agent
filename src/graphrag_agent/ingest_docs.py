@@ -1,6 +1,8 @@
 import asyncio
 from graphrag_agent.tools.crawler import AsyncFileSystemCrawler
-from graphrag_agent.tools.document_embedding import OpenAIEmbeddingGenerator
+from graphrag_agent.tools.document_embedding import (
+    OpenAIEmbedding,
+)  # Use the correct class name if it exists
 from graphrag_agent.tools.vector_store import AsyncAstraDBRepository
 from graphrag_agent.tools.content_parser import AsyncPythonComponentParser
 from graphrag_agent.tools.content_parser import AsyncPythonSampleParser

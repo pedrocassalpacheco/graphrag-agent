@@ -143,7 +143,6 @@ def dump_jsonl_file(file_path: str, max_items: int = 10):
 
                 try:
                     data = json.loads(line)
-                    print(data)
                     # Convert dict back to ParsedContent if it has the right structure
                     if isinstance(data, dict) and "content" in data:
                         parsed_content = ParsedContent(
@@ -171,7 +170,7 @@ def dump_jsonl_file(file_path: str, max_items: int = 10):
             count += 1
             item_header = f"\n--- Item {count} ---"
             print(item_header)
-            print(item)
+
             source_line = f"Source: {item.source}"
             section_line = f"Section: {item.section}"
             content_with_newlines = item.content.replace("\\n", "\n")

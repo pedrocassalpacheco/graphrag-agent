@@ -1,23 +1,25 @@
 import asyncio
-import hashlib
 import io
 import json
 import os
 from typing import Any, Dict, Union, List
 import traceback
 
-from dotenv import load_dotenv
 
 from astrapy.constants import VectorMetric
 from astrapy.info import (
     CollectionDefinition,
-    CollectionVectorOptions,
-    VectorServiceOptions,
 )
 
-from graphrag_agent.utils.logging_config import get_logger
-from graphrag_agent.utils.utils import print_pretty_json
+import asyncio
+import os
+import traceback
+from typing import Any, Optional, override
+
 from graphrag_agent.tools.async_processor import BaseAsyncProcessor
+from graphrag_agent.tools.parse_content import ParsedContent
+from graphrag_agent.tools.async_processor import BaseAsyncProcessor
+from graphrag_agent.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -391,3 +393,109 @@ class AsyncAstraDBRepository(BaseAsyncProcessor):
                 logger.info("AstraDB client closed.")
         except Exception as e:
             logger.error(f"Error closing AstraDB client: {str(e)}")
+
+
+logger = get_logger(__name__)
+
+
+class AsyncFAISSVectorStoreProcessor(BaseAsyncProcessor):
+    """FAISS in-memory vector store processor using LangChain."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        embedding_model_name: str = "text-embedding-3-large",
+        embedding_dimensions: int = 3072,
+        output_dir="index",
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.embedding_model_name = embedding_model_name
+        self.embedding_dimensions = embedding_dimensions
+        self.embedding_model: Optional[Any] = None
+        self.output_dir: str = output_dir
+        self.vectorstore: FAISS = None
+        self._initialized = False
+
+    async def _initialize_store(self) -> None:
+        """Initialize FAISS vector store and OpenAI embeddings."""
+        if self._initialized:
+            return
+
+        try:
+            logger.info(
+                f"Initializing FAISS vector store with OpenAI embeddings: {self.embedding_model_name}"
+            )
+
+            # Import required libraries
+            from langchain.vectorstores import FAISS
+            from langchain.embeddings import OpenAIEmbeddings
+            from langchain_core.documents import Document
+
+            if not self.api_key:
+                raise ValueError(
+                    "OpenAI API key not found. Set OPENAI_API_KEY environment variable or pass api_key parameter."
+                )
+
+            # Initialize OpenAI embeddings
+            self.embedding_model = OpenAIEmbeddings(
+                model=self.embedding_model_name,
+            )
+
+            # Create empty FAISS vector store with a dummy document
+            dummy_doc = Document(
+                page_content="Initialization document",
+                metadata={"type": "dummy", "source": "init"},
+            )
+
+            # Initialize FAISS store
+            self.vectorstore = await asyncio.to_thread(
+                FAISS.from_documents, [dummy_doc], self.embedding_model
+            )
+
+            self._initialized = True
+            logger.info("FAISS vector store initialization complete")
+
+        except Exception as e:
+            logger.error(f"Error initializing FAISS vector store: {str(e)}")
+            logger.error(f"Call stack:\n{traceback.format_exc()}")
+            raise
+
+    @override
+    async def _process_item(self, item: ParsedContent) -> ParsedContent:
+        """Process a ParsedContent item by adding it to the FAISS vector store."""
+        try:
+            # Ensure store is initialized
+            if not self._initialized:
+                await self._initialize_store()
+
+            # Convert ParsedContent to LangChain Document
+            document = item.to_langchain_document()
+
+            # Add document to FAISS store (run in thread to avoid blocking)
+            await asyncio.to_thread(self.vectorstore.add_documents, [document])
+
+            self.processed_count += 1
+            logger.debug(
+                f"Added document to FAISS {self.processed_count}: {item.source} - {item.section}"
+            )
+
+            # Return the original item (pass-through)
+            return item
+
+        except Exception as e:
+            logger.error(f"Error adding to FAISS vector store: {str(e)}")
+            logger.debug(f"Call stack:\n{traceback.format_exc()}")
+            # Return original item on error
+            return item
+
+    async def _cleanup(self) -> None:
+        """Cleanup FAISS vector store."""
+        if self.vectorstore:
+            logger.info("Cleaning up FAISS vector store")
+            self.vectorstore.save_local(self.output_dir)
+            self.vectorstore = None
+            self.embedding_model = None
+        await super()._cleanup()

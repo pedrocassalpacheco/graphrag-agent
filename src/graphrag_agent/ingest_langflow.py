@@ -8,8 +8,12 @@ from graphrag_agent.tools.content_parser import (
 from graphrag_agent.tools.crawler import AsyncFileSystemCrawler
 from graphrag_agent.tools.content_parser import AsyncPythonComponentParser
 from graphrag_agent.tools.document_embedding import OpenAIEmbeddingProcessor
-from graphrag_agent.tools.vector_store import AsyncAstraDBRepository
+from graphrag_agent.tools.vector_store import (
+    AsyncAstraDBRepository,
+    AsyncFAISSVectorStoreProcessor,
+)
 from graphrag_agent.tools.file_writer import AsyncJSONLWriter
+from graphrag_agent.tools.document_embedding import OpenAIEmbeddingProcessor
 
 from graphrag_agent.utils.utils import dump_queue, dump_jsonl_file
 import os
@@ -147,40 +151,118 @@ async def test_components_parser():
     dump_queue(parser_queue)
 
 
-async def test_parsers():
+async def all_sources_to_jsonl():
     """Test AsyncLangflowDocsMarkdownParser processes markdown files correctly."""
-    for parse, file in zip(
+    crawler_queue: asyncio.queues.Queue = asyncio.Queue()
+    parser_queue: asyncio.queues.Queue = asyncio.Queue()
+
+    for parser, path, ext, desc in zip(
         [
             AsyncLangflowDocsMarkdownParser,
             AsyncNoParser,
             AsyncPythonComponentParser,
         ],
         [
-            "/Users/pedropacheco/Projects/dev/langflow.current/docs/docs/Components/components-vector-stores.md",
-            "/Users/pedropacheco/Projects/dev/langflow.current/src/backend/base/langflow/initial_setup/starter_projects/sequential_tasks_agent.py",
-            "/Users/pedropacheco/Projects/dev/langflow.current/src/backend/base/langflow/components/amazon/amazon_bedrock_embedding.py",
+            "/Users/pedropacheco/Projects/dev/langflow.current/docs/docs/Components/",
+            "/Users/pedropacheco/Projects/dev/langflow.current/src/backend/base/langflow/initial_setup/starter_projects/",
+            "/Users/pedropacheco/Projects/dev/langflow.current/src/backend/base/langflow/components/",
         ],
+        ["md", "py", "py"],
+        ["langflow_docs", "code_samples", "langflow_components"],
     ):
-        crawler_queue: asyncio.queues.Queue = asyncio.Queue()
-        parser_queue: asyncio.queues.Queue = asyncio.Queue()
-        parser = parse()
+
+        crawler = AsyncFileSystemCrawler(base_path=path, max_depth=3, extensions=[ext])
+        parser = parser()
+        writer = AsyncJSONLWriter(filename_prefix=desc)
+
+        crawler_task = asyncio.create_task(crawler.run(output=crawler_queue))
         parser_task = asyncio.create_task(
             parser.run(input=crawler_queue, output=parser_queue)
         )
+        writer_task = asyncio.create_task(writer.run(input=parser_queue))
 
-        crawler_queue.put_nowait(file)
-        crawler_queue.put_nowait(None)
-        # Wait for parser task to complete
-        await asyncio.gather(parser_task)
+        # Wait for both tasks to complete
+        await asyncio.gather(crawler_task, parser_task, writer_task)
 
-        dump_queue(parser_queue)
 
-        await asyncio.sleep(1)
+async def all_sources_to_jsonl_with_embedding():
+    """Test AsyncLangflowDocsMarkdownParser processes markdown files correctly."""
+    crawler_queue: asyncio.queues.Queue = asyncio.Queue()
+    parser_queue: asyncio.queues.Queue = asyncio.Queue()
+    embedding_queue: asyncio.queues.Queue = asyncio.Queue()
+
+    for parser, path, ext, desc in zip(
+        [
+            AsyncLangflowDocsMarkdownParser,
+            AsyncNoParser,
+            AsyncPythonComponentParser,
+        ],
+        [
+            "/Users/pedropacheco/Projects/dev/langflow.current/docs/docs/Components/",
+            "/Users/pedropacheco/Projects/dev/langflow.current/src/backend/base/langflow/initial_setup/starter_projects/",
+            "/Users/pedropacheco/Projects/dev/langflow.current/src/backend/base/langflow/components/",
+        ],
+        ["md", "py", "py"],
+        ["langflow_docs", "code_samples", "langflow_components"],
+    ):
+
+        crawler = AsyncFileSystemCrawler(base_path=path, max_depth=3, extensions=[ext])
+        parser = parser()
+        embedding = OpenAIEmbeddingProcessor()
+        writer = AsyncJSONLWriter(filename_prefix=desc + "_embbed")
+
+        crawler_task = asyncio.create_task(crawler.run(output=crawler_queue))
+        parser_task = asyncio.create_task(
+            parser.run(input=crawler_queue, output=parser_queue)
+        )
+        embedding_task = asyncio.create_task(
+            embedding.run(input=parser_queue, output=embedding_queue)
+        )
+        writer_task = asyncio.create_task(writer.run(input=embedding_queue))
+
+        # Wait for both tasks to complete
+        await asyncio.gather(crawler_task, parser_task, embedding_task, writer_task)
+
+
+async def all_sources_to_fiass():
+    """Test AsyncLangflowDocsMarkdownParser processes markdown files correctly."""
+    crawler_queue: asyncio.queues.Queue = asyncio.Queue()
+    parser_queue: asyncio.queues.Queue = asyncio.Queue()
+
+    for parser, path, ext, desc in zip(
+        [
+            AsyncLangflowDocsMarkdownParser,
+            AsyncNoParser,
+            AsyncPythonComponentParser,
+        ],
+        [
+            "/Users/pedropacheco/Projects/dev/langflow.current/docs/docs/Components/",
+            "/Users/pedropacheco/Projects/dev/langflow.current/src/backend/base/langflow/initial_setup/starter_projects/",
+            "/Users/pedropacheco/Projects/dev/langflow.current/src/backend/base/langflow/components/",
+        ],
+        ["md", "py", "py"],
+        ["langflow_docs", "code_samples", "langflow_components"],
+    ):
+
+        crawler = AsyncFileSystemCrawler(base_path=path, max_depth=3, extensions=[ext])
+        parser = parser()
+        writer = AsyncFAISSVectorStoreProcessor()
+
+        crawler_task = asyncio.create_task(crawler.run(output=crawler_queue))
+        parser_task = asyncio.create_task(
+            parser.run(input=crawler_queue, output=parser_queue)
+        )
+        writer_task = asyncio.create_task(writer.run(input=parser_queue))
+
+        # Wait for both tasks to complete
+        await asyncio.gather(crawler_task, parser_task, writer_task)
+        break
 
 
 if __name__ == "__main__":
 
-    asyncio.run(ingest_docs_to_file())
-    # asyncio.run(ingest_docs())
+    # asyncio.run(all_sources_to_jsonl())
+    # asyncio.run(all_sources_to_jsonl_with_embedding())
+    asyncio.run(all_sources_to_fiass())
     # asyncio.run(ingest_components())
     # asyncio.run(ingest_samples())

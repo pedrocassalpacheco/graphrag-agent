@@ -113,18 +113,21 @@ class BaseAsyncProcessor(ABC):
                     await output.put(None)  # Forward termination
                 if isinstance(output, io.TextIOWrapper):
                     output.close()
+
+                #
+                input.task_done()
+
                 break
 
             try:
                 # Process the item (implemented by subclasses)
-                logger.debug
                 result = await self._process_item(item)
 
                 # Convert results to a list for uniform processing
                 if result is None:
                     items_to_process = []
                 elif isinstance(result, (list, set, tuple)):
-                    items_to_process = list(result)
+                    items_to_process = result
                 else:
                     items_to_process = [result]
 
@@ -143,7 +146,4 @@ class BaseAsyncProcessor(ABC):
 
             except Exception as e:
                 logger.error(f"Error processing fron {concrete_class} item: {e}")
-                logger.error(traceback.format_exc())
-            finally:
-                # Mark as done regardless of success/failure
-                input.task_done()
+                logger.debug(traceback.format_exc())

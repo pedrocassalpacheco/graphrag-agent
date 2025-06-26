@@ -1,4 +1,4 @@
-# GraphRAG Agnet
+# GraphRAG Agent
 
 This project implements an agent using Google's Agent Development Kit (ADK).
 
